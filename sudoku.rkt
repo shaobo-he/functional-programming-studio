@@ -95,28 +95,29 @@
   (λ (col-index row-size)
     (build-list row-size (λ ([row : Natural]) (cons row col-index)))))
 
+;; I couldn't get for/list working in typed racket
+(: combine (-> (Listof Natural) (Listof Natural) (Listof Indices)))
+(define combine
+  (λ (rows cols)
+    (cond
+      [(null? rows) '()]
+      [else (append
+             (map (λ ([col : Natural])
+                    (cons (car rows) col))
+                  cols)
+             (combine (cdr rows) cols))])))
+
 (: get/square-indices (-> Indices Indices (Listof Indices)))
 (define get/square-indices
   (λ (indices size)
-    (letrec
-        ;; I couldn't get for/list working in typed racket
-        ([combine : (-> (Listof Natural) (Listof Natural) (Listof Indices))
-                  (λ (rows cols)
-                    (cond
-                      [(null? rows) '()]
-                      [else (append
-                             (map (λ ([col : Natural])
-                                    (cons (car rows) col))
-                                  cols)
-                             (combine (cdr rows) cols))]))])
-      (let-indices
-       ([(X Y) size])
-       (let-indices
-        ([(row-index col-index) indices])
-        (combine (build-list X (λ ([x : Natural])
-                                 (+ (* X (quotient row-index X)) x)))
-                 (build-list Y (λ ([y : Natural])
-                                 (+ (* Y (quotient col-index Y)) y)))))))))
+    (let-indices
+     ([(X Y) size])
+     (let-indices
+      ([(row-index col-index) indices])
+      (combine (build-list X (λ ([x : Natural])
+                               (+ (* X (quotient row-index X)) x)))
+               (build-list Y (λ ([y : Natural])
+                               (+ (* Y (quotient col-index Y)) y))))))))
 
 (: conflict? (-> Board Indices Indices Natural Boolean))
 (define conflict?
