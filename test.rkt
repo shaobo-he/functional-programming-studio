@@ -1,6 +1,7 @@
 #lang typed/racket
 
 (require "sudoku.rkt")
+(require "sudoku-cp.rkt")
 
 (: make/real-board (-> String Board))
 (define make/real-board
@@ -65,6 +66,11 @@
   (make/real-board
    "0 1
     2 0"))
+
+(define simple : Board
+  (make/real-board
+   "1 0
+0 0"))
 
 (define the-most-difficult : Board
   (make/real-board

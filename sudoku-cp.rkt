@@ -2,6 +2,8 @@
 
 (require "sudoku.rkt")
 
+(provide (all-defined-out))
+
 ;; re-implementation of http://norvig.com/sudoku.html
 
 (define-type Options (Listof Natural))
@@ -43,7 +45,7 @@
     (let-indices
      ([(row-num col-num) (get/board-size board)])
      (let ([pos : (Listof Indices) (combine (build-list row-num (λ ([x : Natural]) x))
-                         (build-list col-num (λ ([x : Natural]) x)))])
+                                            (build-list col-num (λ ([x : Natural]) x)))])
        (let ([initial-grid : Grid (foldl (λ ([indices : Indices] [grid : Grid])
                                            (hash-set
                                             grid
@@ -68,7 +70,7 @@
      (λ ([option : Natural] [grid : MaybeGrid])
        (if (false? grid)
            #f
-           (eliminate grid indices size option)))
+           (eliminate grid size indices option)))
      grid
      (remove val (hash-ref grid indices)))))
 
