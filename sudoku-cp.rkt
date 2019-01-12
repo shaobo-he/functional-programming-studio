@@ -38,14 +38,46 @@
                                    (third all)))))
       indices))))
 
+(: get/indices (-> Natural Natural (Listof Indices)))
+(define get/indices
+  (λ (X Y)
+    (combine (build-list X (λ ([x : Natural]) x))
+             (build-list Y (λ ([x : Natural]) x)))))
+
+(: solved-grid? (-> Grid Indices Boolean))
+(define solved-grid?
+  (λ (grid size)
+    (let ([board-size (* (car size) (cdr size))])
+      (andmap (λ ([indices : Indices])
+               (= (length (hash-ref grid indices)) 1))
+               (get/indices board-size board-size)))))
+
+(: solved-grid->string (-> Grid Indices String))
+(define solved-grid->string
+  (λ (grid size)
+    (let ([board-size (* (car size) (cdr size))])
+      (foldr
+       (λ ([row : Natural] [str : String])
+         (string-append
+          (foldr
+           (λ ([col : Natural] [str : String])
+             (string-append
+              (number->string (car (hash-ref grid (cons row col))))
+              " "
+              str))
+           ""
+           (build-list board-size (λ ([x : Natural]) x)))
+          "\n"
+          str))
+       ""
+       (build-list board-size (λ ([x : Natural]) x))))))
 
 (: board->grid (-> Board Indices (U False Grid)))
 (define board->grid
   (λ (board size)
     (let-indices
      ([(row-num col-num) (get/board-size board)])
-     (let ([pos : (Listof Indices) (combine (build-list row-num (λ ([x : Natural]) x))
-                                            (build-list col-num (λ ([x : Natural]) x)))])
+     (let ([pos : (Listof Indices) (get/indices row-num col-num)])
        (let ([initial-grid : Grid (foldl (λ ([indices : Indices] [grid : Grid])
                                            (hash-set
                                             grid
@@ -66,13 +98,14 @@
 (: assign (-> Grid Indices Indices Natural MaybeGrid))
 (define assign
   (λ (grid size indices val)
-    (foldl
-     (λ ([option : Natural] [grid : MaybeGrid])
-       (if (false? grid)
-           #f
-           (eliminate grid size indices option)))
-     grid
-     (remove val (hash-ref grid indices)))))
+    (let ([other-values (remove val (hash-ref grid indices))])
+      (foldl
+       (λ ([option : Natural] [grid : MaybeGrid])
+         (if (false? grid)
+             #f
+             (eliminate grid size indices option)))
+       grid
+       other-values))))
 
 (: eliminate (-> Grid Indices Indices Natural MaybeGrid))
 (define eliminate
@@ -107,13 +140,42 @@
         (if (false? (member val options))
             grid
             (let ([eliminated-options (remove val options)])
-              (if (empty? eliminated-options)
-                  #f
-                  (let ([grid-after-rule-1
-                         (if (= (length eliminated-options) 1)
-                             (apply/eliminate-rule-1 grid (car eliminated-options))
-                             grid)])
-                    ;; Maybe Monad wanted!!!
-                    (if (false? grid-after-rule-1)
-                        #f
-                        (apply/eliminate-rule-2 grid-after-rule-1))))))))))
+              (let ([grid (hash-set grid indices eliminated-options)])
+                (if (empty? eliminated-options)
+                    #f
+                    (let ([grid-after-rule-1
+                           (if (= (length eliminated-options) 1)
+                               (apply/eliminate-rule-1 grid (car eliminated-options))
+                               grid)])
+                      ;; Maybe Monad wanted!!!
+                      (if (false? grid-after-rule-1)
+                          #f
+                          (apply/eliminate-rule-2 grid-after-rule-1)))))))))))
+
+(: solve-cp (-> Board Indices MaybeGrid))
+(define solve-cp
+  (λ (board size)
+    (call/cc (λ ([k : (-> Grid Grid)])
+               (let ([board-size (* (car size) (cdr size))])
+                 (letrec
+                     ([solve-cp-grid : (-> Grid MaybeGrid)
+                                     (λ (grid)
+                                       (if (solved-grid? grid size)
+                                           (k grid)
+                                           (let ([best-option
+                                                  (argmin
+                                                   (λ (indices)
+                                                     (let ([len (length (hash-ref grid indices))])
+                                                       (if (> len 1) len (+ board-size 1))))
+                                                   (get/indices board-size board-size))])
+                                             (foldl (λ ([val : Natural] result)
+                                                      (let ([new-grid (assign grid size best-option val)])
+                                                        (if (false? new-grid)
+                                                            #f
+                                                            (solve-cp-grid new-grid))))
+                                                    #f
+                                                    (hash-ref grid best-option)))))])
+                   (let ([init-grid (board->grid board size)])
+                     (if (false? init-grid)
+                         #f
+                         (solve-cp-grid init-grid)))))))))

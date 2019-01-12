@@ -155,17 +155,14 @@
                                                              (let ([pos (get/pos board indices)])
                                                                (if (and (Hole? pos) (= (Hole-val pos) 0))
                                                                    (foldl
-                                                                    (λ ([val : Natural] [result : False])
+                                                                    (λ ([val : Natural] [result : (U False Board)])
                                                                       (if (not (conflict? board size indices val))
-                                                                          (if (false?
-                                                                               (solve-by-indices (set/pos board indices val)
-                                                                                                 (cons row-index (+ col-index 1))))
-                                                                               result
-                                                                              #f)
-                                                                          result))
+                                                                          (solve-by-indices (set/pos board indices val)
+                                                                                            (cons row-index (+ col-index 1)))
+                                                                          #f))
                                                                     #f
                                                                     (build-list row-num (λ ([x : Natural]) (+ x 1))))
-                                                                   (solve-by-indices board (cons row-index (+ col-index 1)))))])))])                                                                                    
+                                                                   (solve-by-indices board (cons row-index (+ col-index 1)))))])))])                                                                                   
                   (solve-by-indices board (cons 0 0))))))))
 
 #|

@@ -14,8 +14,15 @@
 (define display/real-board
   (λ (a)
     (if (false? a)
-        (error "not valid board")
+        (error "not a valid board")
         (display/board a))))
+
+(: display/real-grid (-> MaybeGrid Indices Void))
+(define display/real-grid
+  (λ (g size)
+    (if (false? g)
+        (error "not a valid board")
+        (display (solved-grid->string g size)))))
 
 (define empty-2by3 : Board
   (make/real-board
@@ -72,7 +79,7 @@
    "1 0
 0 0"))
 
-(define the-most-difficult : Board
+(define the-most-difficult-known : Board
   (make/real-board
    "8 5 0 0 0 2 4 0 0
 7 2 0 0 0 0 0 0 9
@@ -83,4 +90,17 @@
 0 0 0 0 8 0 0 7 0
 0 1 7 0 0 0 0 0 0
 0 0 0 0 3 6 0 4 0
+"))
+
+(define the-most-difficult-created : Board
+  (make/real-board
+   "0 0 5 3 0 0 0 0 0
+8 0 0 0 0 0 0 2 0
+0 7 0 0 1 0 5 0 0
+4 0 0 0 0 5 3 0 0
+0 1 0 0 7 0 0 0 6
+0 0 3 2 0 0 0 8 0
+0 6 0 5 0 0 0 0 9
+0 0 4 0 0 0 0 3 0
+0 0 0 0 0 9 7 0 0
 "))
