@@ -12,7 +12,7 @@
 
 (define-type Unit (Listof Indices))
 
-(define size (cons 3 3))
+;(define size (cons 3 3))
 
 (: get/units (-> Indices Indices (Listof Unit)))
 (define get/units
