@@ -3,16 +3,22 @@ module Santorini where
 import Control.Monad
 import System.Random
 import qualified Data.HashMap.Strict as DHS (lookup, empty, HashMap, insert, adjust)
+import Data.List (intercalate)
+import Control.Monad.State.Lazy
 
 type Pos = (Int, Int)
 type Player = (Pos, Pos)
 type Players = (Player, Player)
 type Board = DHS.HashMap Pos Int
 
+-- representation of game states
 data GameState = GameState { getTurn :: Int
                            , getPlayers :: Players
                            , getBoard :: Board
                            } deriving (Show)
+
+-- game outcome
+--data GameOutcome = Win | Lose | Undecided deriving (Show)
 
 getLevel :: Pos -> Board -> Int
 getLevel pos board = case DHS.lookup pos board of
@@ -49,7 +55,8 @@ getValidAdjPosns move pos (player1, player2) board = filter validPos
 getValidAdjPosnsToMove = getValidAdjPosns True
 getValidAdjPosnsToBuild = getValidAdjPosns False
 
-getValidMoves :: GameState -> [GameState]
+--getValidMoves :: GameState -> [GameState]
+getValidMoves :: GameState -> [(Players, Maybe Pos)]
 getValidMoves GameState {getTurn=turn, getPlayers=players, getBoard=board} =
   do
     let player = fst players
@@ -57,15 +64,41 @@ getValidMoves GameState {getTurn=turn, getPlayers=players, getBoard=board} =
                          [\pos->(pos, snd player), \pos->(fst player, pos)]
     newPos <- getValidAdjPosnsToMove pos players board
     let newPlayers = (setter newPos, snd players)
-    let buildPosns = getValidAdjPosnsToBuild newPos newPlayers board
-    guard $ length buildPosns > 0
+    let buildPosns = if isWinningPos board newPos
+                      then [Nothing]
+                      else Just <$> (getValidAdjPosnsToBuild newPos newPlayers board)
     buildPos <- buildPosns
-    return $ GameState
-      turn
-      newPlayers
-      (buildAtPos buildPos board)
+    --return $ GameState
+    --  turn
+    --  newPlayers
+    --  (buildAtPos buildPos board)
+    return $ (newPlayers, buildPos)
+
+isWinningPos :: Board -> Pos -> Bool
+isWinningPos board pos = getLevel pos board == 3
+
+switchPlayers :: Players -> Players
+switchPlayers (a,b) = (b,a)
+
+playOut :: Bool -> GameState -> State StdGen (Bool, String, GameState)
+playOut isMyTurn gs@(GameState {getTurn=turn, getPlayers=players, getBoard=board}) =
+  let moves = getValidMoves gs in
+    -- can't move
+    if length moves == 0
+      then return (if isMyTurn then False else True, "can't move", gs)
+      else
+        -- pick one
+        do
+          chosen <- (moves !!) <$> (state $ randomR (0, (length moves) - 1))
+          case snd chosen of
+            Just pos -> playOut (not isMyTurn) $
+                          GameState (turn+1) (switchPlayers $ fst chosen) (buildAtPos pos board)
+            Nothing -> return $ (if isMyTurn then True else False, "simply win",
+                        GameState (turn+1) (switchPlayers $ fst chosen) board)
 
 main :: IO()
 main = do
-  let gs = GameState 2 (((2,3),(4,4)),((3,5),(2,5))) $ boardFromList [[0,0,0,0,2],[1,1,2,0,0],[1,0,0,3,0],[0,0,3,0,0],[0,0,0,1,4]]
-  putStrLn $ show $ length $ getValidMoves gs
+  let gs = GameState 2 (((2,3),(4,4)),((3,5),(2,5))) $
+            boardFromList [[0,0,0,0,2],[1,1,2,0,0],[1,0,0,3,0],[0,0,3,0,0],[0,0,0,1,4]]
+  --putStrLn $ intercalate "\n" $ map show $ getValidMoves gs
+  putStrLn $ show $ runState (playOut True gs) $ mkStdGen 200
