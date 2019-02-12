@@ -1,4 +1,10 @@
-module Santorini where
+module Santorini (
+  GameState(..),
+  getValidNextStates,
+  playOut,
+  isWinningPlayer,
+  boardFromList,
+) where
 
 import Control.Monad
 import System.Random
@@ -74,31 +80,47 @@ getValidMoves GameState {getTurn=turn, getPlayers=players, getBoard=board} =
     --  (buildAtPos buildPos board)
     return $ (newPlayers, buildPos)
 
+getValidNextStates :: GameState -> [GameState]
+getValidNextStates gs@(GameState {getTurn=turn, getPlayers=players, getBoard=board}) =
+  let moves = getValidMoves gs in
+    updateGameStates <$> moves where
+      updateGameStates (players, mpos) = case mpos of
+        Just pos -> GameState (turn+1) (switchPlayers players) (buildAtPos pos board)
+        Nothing -> GameState (turn+1) (switchPlayers players) board
+
 isWinningPos :: Board -> Pos -> Bool
 isWinningPos board pos = getLevel pos board == 3
+
+isWinningPlayer :: Board -> Player -> Bool
+isWinningPlayer board player = (isWinningPos board (fst player)) ||
+                                (isWinningPos board (snd player))
 
 switchPlayers :: Players -> Players
 switchPlayers (a,b) = (b,a)
 
-playOut :: Bool -> GameState -> State StdGen (Bool, String, GameState)
-playOut isMyTurn gs@(GameState {getTurn=turn, getPlayers=players, getBoard=board}) =
-  let moves = getValidMoves gs in
-    -- can't move
-    if length moves == 0
-      then return (if isMyTurn then False else True, "can't move", gs)
+playOut :: GameState -> State StdGen (Bool, GameState)
+playOut gs@(GameState {getTurn=turn, getPlayers=players, getBoard=board}) =
+  let isMyTurn = turn `mod` 2 == 1 in
+    if isWinningPlayer board $ snd players
+      then return $ ((not isMyTurn), gs)
       else
-        -- pick one
-        do
-          chosen <- (moves !!) <$> (state $ randomR (0, (length moves) - 1))
-          case snd chosen of
-            Just pos -> playOut (not isMyTurn) $
-                          GameState (turn+1) (switchPlayers $ fst chosen) (buildAtPos pos board)
-            Nothing -> return $ (if isMyTurn then True else False, "simply win",
-                        GameState (turn+1) (switchPlayers $ fst chosen) board)
+        let moves = getValidMoves gs in
+          -- can't move
+          if length moves == 0
+            then return (if isMyTurn then False else True, gs)
+            else
+              -- pick one
+              do
+                chosen <- (moves !!) <$> (state $ randomR (0, (length moves) - 1))
+                case snd chosen of
+                  Just pos -> playOut $
+                                GameState (turn+1) (switchPlayers $ fst chosen) (buildAtPos pos board)
+                  Nothing -> return $ (if isMyTurn then True else False,
+                              GameState (turn+1) (switchPlayers $ fst chosen) board)
 
 main :: IO()
 main = do
-  let gs = GameState 2 (((2,3),(4,4)),((3,5),(2,5))) $
+  let gs = GameState 1 (((2,3),(4,4)),((3,5),(2,5))) $
             boardFromList [[0,0,0,0,2],[1,1,2,0,0],[1,0,0,3,0],[0,0,3,0,0],[0,0,0,1,4]]
   --putStrLn $ intercalate "\n" $ map show $ getValidMoves gs
-  putStrLn $ show $ runState (playOut True gs) $ mkStdGen 200
+  putStrLn $ show $ runState (playOut gs) $ mkStdGen 200
