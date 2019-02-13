@@ -3,7 +3,9 @@ module Main where
 import Control.Monad.State.Lazy
 import Data.Aeson
 import System.Random
-import qualified Data.ByteString.Lazy as DBL (getContents, ByteString)
+import System.IO (stdin)
+import qualified Data.ByteString as B (hGetLine)
+import qualified Data.ByteString.Lazy as BL (putStrLn)
 import Santorini
 import MCTS
 
@@ -40,8 +42,9 @@ start gs@(GameState turn players@(player1, player2) board)
 
 main :: IO ()
 main = do
-  jsonStr <- DBL.getContents
-  case decode jsonStr of
-    Just gs@(GameState turn players board) -> putStrLn $ show $ encode . (updateTurn (turn+1)) . fst $ runState (start gs) $ mkStdGen 200
-    Nothing -> putStrLn $ show jsonStr
+  --jsonStr <- DBL.getContents
+  jsonStr <- B.hGetLine stdin
+  case decodeStrict jsonStr of
+    Just gs@(GameState turn players board) -> BL.putStrLn $ encode . (updateTurn (turn+1)) . fst $ runState (start gs) $ mkStdGen 200
+    Nothing -> error "cannot proceed!"
   main
