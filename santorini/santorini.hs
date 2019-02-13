@@ -1,16 +1,21 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Santorini (
   GameState(..),
   getValidNextStates,
   playOut,
   isWinningPlayer,
   boardFromList,
+  boardToList
 ) where
 
 import Control.Monad
+import Control.Applicative
 import System.Random
 import qualified Data.HashMap.Strict as DHS (lookup, empty, HashMap, insert, adjust)
 import Data.List (intercalate)
 import Control.Monad.State.Lazy
+import Data.Aeson
+import qualified Data.ByteString.Lazy as DBL (getContents, ByteString)
 
 type Pos = (Int, Int)
 type Player = (Pos, Pos)
@@ -23,8 +28,31 @@ data GameState = GameState { getTurn :: Int
                            , getBoard :: Board
                            } deriving (Show)
 
--- game outcome
---data GameOutcome = Win | Lose | Undecided deriving (Show)
+-- parsing stuff
+instance FromJSON GameState where
+  parseJSON (Object v) =
+    do
+      turn <- v .: "turn"
+      players <- v .: "players"
+      spaces <- v .: "spaces"
+      return $ GameState turn (parsePlayers players) (boardFromList spaces) where
+    parsePlayers players
+      | length players == 0 = (((-1,-1),(-1,-1)), ((-1,-1),(-1,-1)))
+      | length players == 1 = let player = players !! 0 in
+                                (((-1,-1),(-1,-1)), playerListToTuple player)
+      | length players == 2 = let [player1, player2] = players in
+                                (playerListToTuple player1, playerListToTuple player2) where
+        playerListToTuple [[x1,y1], [x2,y2]] = ((x1,y1), (x2,y2))
+
+instance ToJSON GameState where
+  toJSON (GameState turn players board) =
+    object ["turn" .= turn,
+            "players" .= playersToList players,
+            "spaces" .= boardToList board] where
+    playersToList (((-1,-1),(-1,-1)),((-1,-1),(-1,-1))) = []
+    playersToList (((-1,-1),(-1,-1)), player) = [playerTupleToList player]
+    playersToList (player1, player2) = [playerTupleToList player1, playerTupleToList player2]
+    playerTupleToList ((x1,y1), (x2,y2)) = [[x1,y1], [x2,y2]]
 
 getLevel :: Pos -> Board -> Int
 getLevel pos board = case DHS.lookup pos board of
@@ -32,8 +60,12 @@ getLevel pos board = case DHS.lookup pos board of
   Nothing -> error "pos not in board"
 
 boardFromList :: [[Int]] -> Board
-boardFromList lst = foldl insertPos (DHS.empty::Board) [(a,b) | a<-[0..4], b<-[0..4]]
-  where insertPos board (a,b) = DHS.insert (a+1, b+1) ((lst !! a) !! b) board
+boardFromList lst = foldl collectRow (DHS.empty::Board) $ zip lst [1..(length lst)] where
+  collectRow board (row,rid) = foldl collectCol board $ zip row [1..(length row)] where
+    collectCol board (level,cid) = DHS.insert (rid, cid) level board
+
+boardToList :: Board -> [[Int]]
+boardToList board = [[getLevel (row,col) board | col <- [1..5]] | row <- [1..5]]
 
 buildAtPos :: Pos -> Board -> Board
 buildAtPos = DHS.adjust (+1)
@@ -98,6 +130,7 @@ isWinningPlayer board player = (isWinningPos board (fst player)) ||
 switchPlayers :: Players -> Players
 switchPlayers (a,b) = (b,a)
 
+-- should be a type class function
 playOut :: GameState -> State StdGen (Bool, GameState)
 playOut gs@(GameState {getTurn=turn, getPlayers=players, getBoard=board}) =
   let isMyTurn = turn `mod` 2 == 1 in
