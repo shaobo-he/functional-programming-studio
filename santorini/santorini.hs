@@ -5,17 +5,20 @@ module Santorini (
   playOut,
   isWinningPlayer,
   boardFromList,
-  boardToList
+  boardToList,
+  noPos,
+  noPlayer,
+  isDiffPos,
+  isNoPlayer,
+  mkRandPos,
 ) where
 
 import Control.Monad
-import Control.Applicative
 import System.Random
 import qualified Data.HashMap.Strict as DHS (lookup, empty, HashMap, insert, adjust)
 import Data.List (intercalate)
 import Control.Monad.State.Lazy
 import Data.Aeson
-import qualified Data.ByteString.Lazy as DBL (getContents, ByteString)
 
 type Pos = (Int, Int)
 type Player = (Pos, Pos)
@@ -28,6 +31,22 @@ data GameState = GameState { getTurn :: Int
                            , getBoard :: Board
                            } deriving (Show)
 
+noPos = (-1,-1)
+noPlayer = (noPos, noPos)
+noPlayers = (noPlayer, noPlayer)
+
+isDiffPos :: Pos -> Pos -> Bool
+isDiffPos (row1, col1) (row2, col2) = not ((row1 == row2) && (col1 == col2))
+
+isNoPlayer :: Player -> Bool
+isNoPlayer (pos1, pos2) = (not $ isDiffPos noPos pos1) && (not $ isDiffPos noPos pos2)
+
+mkRandPos :: State StdGen Pos
+mkRandPos = do
+  row <- state $ randomR (1,5)
+  col <- state $ randomR (1,5)
+  return (row, col)
+
 -- parsing stuff
 instance FromJSON GameState where
   parseJSON (Object v) =
@@ -37,9 +56,9 @@ instance FromJSON GameState where
       spaces <- v .: "spaces"
       return $ GameState turn (parsePlayers players) (boardFromList spaces) where
     parsePlayers players
-      | length players == 0 = (((-1,-1),(-1,-1)), ((-1,-1),(-1,-1)))
+      | length players == 0 = noPlayers
       | length players == 1 = let player = players !! 0 in
-                                (((-1,-1),(-1,-1)), playerListToTuple player)
+                                (playerListToTuple player, noPlayer)
       | length players == 2 = let [player1, player2] = players in
                                 (playerListToTuple player1, playerListToTuple player2) where
         playerListToTuple [[x1,y1], [x2,y2]] = ((x1,y1), (x2,y2))
@@ -49,9 +68,9 @@ instance ToJSON GameState where
     object ["turn" .= turn,
             "players" .= playersToList players,
             "spaces" .= boardToList board] where
-    playersToList (((-1,-1),(-1,-1)),((-1,-1),(-1,-1))) = []
-    playersToList (((-1,-1),(-1,-1)), player) = [playerTupleToList player]
-    playersToList (player1, player2) = [playerTupleToList player1, playerTupleToList player2]
+    playersToList (player1, player2)
+      | isNoPlayer player1 = [playerTupleToList player2]
+      | otherwise = [playerTupleToList player1, playerTupleToList player2]
     playerTupleToList ((x1,y1), (x2,y2)) = [[x1,y1], [x2,y2]]
 
 getLevel :: Pos -> Board -> Int

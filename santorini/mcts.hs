@@ -1,4 +1,6 @@
-module MCTS where
+module MCTS (
+  mcts,
+) where
 
 import Control.Monad
 import Data.Tree
