@@ -104,7 +104,7 @@ mctsOneIteration root = let (st@(Node ss children), cbs) = pickCandidate root in
 
 mctsDo :: STZipper -> State StdGen STZipper
 mctsDo root@(st@(Node ss children), cbs)
-  | getVisits ss >= 1000 = return root
+  | getVisits ss >= 2000 = return root
   | otherwise = mctsOneIteration root >>= mctsDo
 
 mcts :: GameState -> State StdGen GameState
@@ -126,5 +126,5 @@ main = do
   let gs = GameState 1 (((2,3),(4,4)),((3,5),(2,5))) $
             boardFromList [[0,0,0,0,2],[1,1,2,0,0],[1,0,0,3,0],[0,0,3,0,0],[0,0,0,1,4]]
   --putStrLn $ intercalate "\n" $ map show $ getValidMoves gs
-  putStrLn $ show $ getPlayers . fst $ runState (mcts gs) $ mkStdGen 200
+  putStrLn $ show $ getPlayers . fst $ runState (mcts gs) $ mkStdGen 100
   --putStrLn $ fst $ runState (mctsShow rootZipper) $ mkStdGen 200

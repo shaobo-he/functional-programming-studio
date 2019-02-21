@@ -4,7 +4,7 @@ import Control.Monad.State.Lazy
 import Control.Monad
 import Data.Aeson
 import System.Random
-import System.IO (stdin)
+import System.IO (stdin, stdout, hFlush)
 import qualified Data.ByteString as B (hGetLine, ByteString)
 import qualified Data.ByteString.Lazy as BL (putStrLn, ByteString)
 import Santorini
@@ -90,8 +90,8 @@ play gen0 = do
   jsonStr <- B.hGetLine stdin
   let (playerJsonStr, gen1) = runState (placePlayer jsonStr) gen0
   case playerJsonStr of
-    Just str -> BL.putStrLn str >> play gen1
-    Nothing -> let (board, gen2) = runState (playBoard jsonStr) gen1 in BL.putStrLn board >> play gen2
+    Just str -> BL.putStrLn str >> hFlush stdout >> play gen1
+    Nothing -> let (board, gen2) = runState (playBoard jsonStr) gen1 in BL.putStrLn board >> hFlush stdout >> play gen2
 
 main :: IO ()
 main = do
