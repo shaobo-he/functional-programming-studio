@@ -3,27 +3,25 @@
 (require "sudoku.rkt")
 (require "sudoku-cp.rkt")
 
-(define make/real-board
-  (λ (s)
-    (let ([board (make/board s)])
-      (if (list? board)
-          board
-          (error "not a board")))))
+(define (make/real-board s)
+  (let ([board (make/board s)])
+    (if (list? board)
+        board
+        (error "not a board"))))
 
-(define display/real-board
-  (λ (a)
-    (if (false? a)
-        (error "not a valid board")
-        (display/board a))))
+(define (display/real-board a)
+  (if (false? a)
+      (error "not a valid board")
+      (display/board a)))
 
-(define display/real-grid
-  (λ (g size)
-    (if (false? g)
-        (error "not a valid board")
-        (display (solved-grid->string g size)))))
+(define (display/real-grid g size)
+  (if (false? g)
+      (error "not a valid board")
+      (display (solved-grid->string g size))))
 
 (define empty-2by3
-  (make/real-board "0 0 0 0 0 0
+  (make/real-board
+   "0 0 0 0 0 0
 0 0 0 0 0 0
 0 0 0 0 0 0
 0 0 0 0 0 0
