@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module Santorini (
+module Santorini.Legacy.Game (
   GameState(..),
   getValidNextStates,
   playOut,

@@ -16,8 +16,8 @@ import System.Random
 import Text.Read (readMaybe)
 import qualified Data.ByteString as B (hGetLine, ByteString)
 import qualified Data.ByteString.Lazy.Char8 as BL (putStrLn, ByteString)
-import Santorini
-import MCTS
+import Santorini.Legacy.Game
+import Santorini.Legacy.MCTS
 
 updateTurn :: Int -> GameState -> GameState
 updateTurn newTurn (GameState _ players board) =

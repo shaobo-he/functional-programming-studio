@@ -38,18 +38,19 @@ import Santorini.Protocol (decodeBoard, decodePlacement, encodeBoard, placementT
 -- ----------------------------------------------------------------------------
 
 data RefConfig = RefConfig
-  { cmdA    :: FilePath   -- ^ executable for contestant A
-  , cmdB    :: FilePath   -- ^ executable for contestant B
-  , nGames  :: Int        -- ^ games to play (first move alternates)
-  , thinkMs :: Int        -- ^ per-move think budget handed to each player (ms)
-  , plyCap  :: Int        -- ^ max plies before declaring a draw
-  , logPath :: FilePath   -- ^ transcript file
+  { cmdA       :: FilePath        -- ^ executable for contestant A
+  , cmdB       :: FilePath        -- ^ executable for contestant B
+  , nGames     :: Int             -- ^ games to play (first move alternates)
+  , thinkMs    :: Int             -- ^ per-move think budget handed to each player (ms)
+  , plyCap     :: Int             -- ^ max plies before declaring a draw
+  , logPath    :: FilePath        -- ^ human-readable transcript file
+  , boardsPath :: Maybe FilePath  -- ^ if set, full board state per ply as JSONL
   }
 
 defaultConfig :: FilePath -> FilePath -> RefConfig
 defaultConfig a b = RefConfig
   { cmdA = a, cmdB = b, nGames = 2
-  , thinkMs = 1000, plyCap = 400, logPath = "referee-log.txt" }
+  , thinkMs = 1000, plyCap = 400, logPath = "referee-log.txt", boardsPath = Nothing }
 
 -- | Hard per-move wall-clock limit (microseconds): the think budget plus a
 -- generous grace margin for process startup / GC. Exceeding it is a loss.
@@ -137,6 +138,7 @@ data GameLog = GameLog
   , glSteps      :: [Step]
   , glWinner     :: Maybe Char
   , glReason     :: String
+  , glBoards     :: [GameState]   -- ^ initial post-placement state, then after each ply
   }
 
 -- ----------------------------------------------------------------------------
@@ -219,17 +221,18 @@ playLoop
   -> (PlayerProc, Char)            -- other
   -> Int                           -- ply
   -> [Step]                        -- accumulated steps (reversed)
-  -> IO (Maybe Char, String, [Step])
-playLoop cfg s active@(ap, aside) other@(_, oside) ply acc
+  -> [GameState]                   -- accumulated post-move boards (reversed)
+  -> IO (Maybe Char, String, [Step], [GameState])
+playLoop cfg s active@(ap, aside) other@(_, oside) ply acc bacc
   | ply > plyCap cfg =
-      pure (Nothing, "ply cap reached -> draw", reverse acc)
+      pure (Nothing, "ply cap reached -> draw", reverse acc, reverse bacc)
   | null (getValidNextStates s) =
-      pure (Just oside, ppName ap ++ " (" ++ [aside] ++ ") has no legal move", reverse acc)
+      pure (Just oside, ppName ap ++ " (" ++ [aside] ++ ") has no legal move", reverse acc, reverse bacc)
   | otherwise = do
       t0   <- getCurrentTime
       sent <- sendLine (ppIn ap) (encodeBoard s)
       if not sent
-        then pure (Just oside, ppName ap ++ " (" ++ [aside] ++ ") closed its input", reverse acc)
+        then pure (Just oside, ppName ap ++ " (" ++ [aside] ++ ") closed its input", reverse acc, reverse bacc)
         else do
           mresp <- readLineT (hardMicros cfg) (ppOut ap)
           t1    <- getCurrentTime
@@ -237,24 +240,25 @@ playLoop cfg s active@(ap, aside) other@(_, oside) ply acc
           case mresp of
             Nothing ->
               pure (Just oside, ppName ap ++ " (" ++ [aside] ++ ") timed out (> "
-                                ++ show (hardMicros cfg `div` 1000) ++ "ms) or crashed", reverse acc)
+                                ++ show (hardMicros cfg `div` 1000) ++ "ms) or crashed", reverse acc, reverse bacc)
             Just line ->
               case decodeBoard (BLC.pack line) of
                 Nothing ->
-                  pure (Just oside, ppName ap ++ " returned an unparseable board", reverse acc)
+                  pure (Just oside, ppName ap ++ " returned an unparseable board", reverse acc, reverse bacc)
                 Just s' ->
                   case legalNext s s' of
                     Nothing ->
-                      pure (Just oside, ppName ap ++ " (" ++ [aside] ++ ") made an ILLEGAL move", reverse acc)
+                      pure (Just oside, ppName ap ++ " (" ++ [aside] ++ ") made an ILLEGAL move", reverse acc, reverse bacc)
                     Just t -> do
                       let (frm, to) = movedWorker (fst (getPlayers s)) (snd (getPlayers t))
                           bld       = buildDiff (getBoard s) (getBoard t)
                           won       = moverWon t
                           step      = Step (ppName ap) aside (getTurn t) frm to bld won elapsedMs
                           acc'      = step : acc
+                          bacc'     = t : bacc
                       if won
-                        then pure (Just aside, ppName ap ++ " (" ++ [aside] ++ ") reached level 3", reverse acc')
-                        else playLoop cfg t other active (ply + 1) acc'
+                        then pure (Just aside, ppName ap ++ " (" ++ [aside] ++ ") reached level 3", reverse acc', reverse bacc')
+                        else playLoop cfg t other active (ply + 1) acc' bacc'
 
 -- ----------------------------------------------------------------------------
 -- One game
@@ -272,10 +276,10 @@ playOneGame cfg gi = do
   ep <- placementPhase cfg first second
   result <- case ep of
     Left (winner, reason) ->
-      pure (GameLog gi fside [] [] (Just winner) reason)
+      pure (GameLog gi fside [] [] (Just winner) reason [])
     Right (s0, pls) -> do
-      (mw, reason, steps) <- playLoop cfg s0 first second 1 []
-      pure (GameLog gi fside pls steps mw reason)
+      (mw, reason, steps, boards) <- playLoop cfg s0 first second 1 [] []
+      pure (GameLog gi fside pls steps mw reason (s0 : boards))
   terminatePlayer a
   terminatePlayer b
   pure result
@@ -291,17 +295,26 @@ runReferee cfg = do
       header = renderHeader cfg nameA' nameB'
   putStr header
   hFlush stdout
+  case boardsPath cfg of            -- truncate the boards file up front
+    Just bp -> writeFile bp ""
+    Nothing -> pure ()
   -- Print each game's transcript as it finishes, so a later game's trouble
   -- can never erase results already played.
   logs <- forM [1 .. nGames cfg] $ \gi -> do
     g <- playOneGame cfg gi
     putStr (renderGame g)
     hFlush stdout
+    case boardsPath cfg of
+      Just bp -> appendFile bp (renderBoards gi (glBoards g))
+      Nothing -> pure ()
     pure g
   let summary = renderSummary nameA' nameB' logs
   putStr summary
   writeFile (logPath cfg) (header ++ concatMap renderGame logs ++ summary)
   printf "\n(transcript written to %s)\n" (logPath cfg)
+  case boardsPath cfg of
+    Just bp -> printf "(per-ply board states written to %s)\n" bp
+    Nothing -> pure ()
 
 -- ----------------------------------------------------------------------------
 -- Rendering
@@ -333,6 +346,16 @@ renderGame g =
          (maybe "draw" (\w -> "side " ++ [w] ++ " wins") (glWinner g))
          (length (glSteps g))
          (glReason g)
+
+-- | Full board state after each ply, as JSONL: one
+-- @{"game":G,"ply":P,"board":{turn,players,spaces}}@ object per line. Ply 0 is
+-- the initial post-placement position. Lets any later analysis read positions
+-- directly without replaying moves.
+renderBoards :: Int -> [GameState] -> String
+renderBoards gi states = unlines
+  [ "{\"game\":" ++ show gi ++ ",\"ply\":" ++ show ply
+    ++ ",\"board\":" ++ BLC.unpack (encodeBoard st) ++ "}"
+  | (ply, st) <- zip [0 :: Int ..] states ]
 
 renderHeader :: RefConfig -> String -> String -> String
 renderHeader cfg nameA' nameB' =

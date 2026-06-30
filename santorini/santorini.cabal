@@ -1,0 +1,72 @@
+cabal-version:      2.4
+name:               santorini
+version:            0.1.0.0
+synopsis:           Santorini engines + JSON-protocol referee (Utah CS6963)
+description:        One project for all the Santorini code:
+                    .
+                    * Santorini.Core / Protocol / Engine.Modern / Search:
+                      the modern engine (negamax MCTS + MCTS-Solver + heavy
+                      rollouts), time-bounded and root-parallel, speaking the
+                      course line-delimited JSON protocol.
+                    * Santorini.Legacy.Game / MCTS: the repaired original
+                      course submission (a distinct game model + zipper MCTS),
+                      now negamax-correct, time-bounded and root-parallel.
+                    * Santorini.Referee: spawns two protocol-speaking players,
+                      validates every move, enforces a per-move time limit, and
+                      logs every step.
+                    .
+                    Executables: modern-player, legacy-player, referee.
+build-type:         Simple
+
+common warnings
+    ghc-options:      -Wall
+
+library
+    import:           warnings
+    hs-source-dirs:   src
+    exposed-modules:  Santorini.Core
+                      Santorini.Protocol
+                      Santorini.Engine.Modern
+                      Santorini.Search
+                      Santorini.Referee
+                      Santorini.Legacy.Game
+                      Santorini.Legacy.MCTS
+    build-depends:    base
+                    , containers
+                    , aeson
+                    , bytestring
+                    , process
+                    , filepath
+                    , time
+                    , unix
+                    , mtl
+                    , random
+                    , unordered-containers
+    default-language: Haskell2010
+
+-- Modern engine player (enh: negamax + solver + heavy rollouts)
+executable modern-player
+    import:           warnings
+    main-is:          ModernPlayer.hs
+    hs-source-dirs:   app
+    build-depends:    base, santorini
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-N"
+    default-language: Haskell2010
+
+-- Repaired original course bot (the "old" engine)
+executable legacy-player
+    import:           warnings
+    main-is:          LegacyPlayer.hs
+    hs-source-dirs:   app
+    build-depends:    base, santorini, aeson, bytestring, mtl, random, time
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-N"
+    default-language: Haskell2010
+
+-- Driver: runs two protocol-speaking players against each other
+executable referee
+    import:           warnings
+    main-is:          Referee.hs
+    hs-source-dirs:   app
+    build-depends:    base, santorini
+    ghc-options:      -O2 -threaded -rtsopts
+    default-language: Haskell2010

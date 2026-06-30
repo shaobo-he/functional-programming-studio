@@ -1,4 +1,4 @@
-module MCTS (
+module Santorini.Legacy.MCTS (
   mcts,
   -- anytime / resumable API for the time-bounded parallel driver
   mkRootTree,
@@ -13,7 +13,7 @@ import Data.List (maximumBy)
 import Data.Function (on)
 import Control.Monad.State.Lazy
 import System.Random
-import Santorini
+import Santorini.Legacy.Game
 
 -- Strict counters: without this the lazy (+v)/(+1) build thunk chains across a
 -- whole move's search, blowing residency to hundreds of MB on endgame boards
