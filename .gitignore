@@ -1,7 +1,7 @@
 *.hi
 *.o
 *.rkt~
-lean/.lake/
+.lake/
 dist-newstyle/
 compiled/
 referee-log.txt
