@@ -6,14 +6,22 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Based on actions/starter-workflows ci/haskell.yml (haskell-actions/setup is
+  # the maintained successor to the starter's actions/setup-haskell@v1).
   haskell:
-    name: Haskell (santorini) — build, test, referee smoke
+    name: Haskell CI (santorini)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: santorini
     steps:
       - uses: actions/checkout@v4
 
@@ -22,27 +30,30 @@ jobs:
           ghc-version: '9.6.6'
           cabal-version: '3.10.3.0'
 
-      - name: Cache cabal store + build
+      - name: Cache
         uses: actions/cache@v4
+        env:
+          cache-name: cache-cabal
         with:
-          path: |
-            ~/.cabal/store
-            santorini/dist-newstyle
-          key: cabal-${{ runner.os }}-ghc9.6.6-${{ hashFiles('santorini/santorini.cabal') }}
-          restore-keys: cabal-${{ runner.os }}-ghc9.6.6-
+          path: ~/.cabal
+          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/*.cabal') }}-${{ hashFiles('**/cabal.project') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache-name }}-
+            ${{ runner.os }}-build-
+            ${{ runner.os }}-
 
-      - name: Build (all components, -Wall)
-        working-directory: santorini
+      - name: Install dependencies
         run: |
           cabal update
-          cabal build all
+          cabal build --only-dependencies --enable-tests --enable-benchmarks
 
-      - name: Unit tests
-        working-directory: santorini
+      - name: Build
+        run: cabal build --enable-tests --enable-benchmarks all
+
+      - name: Run tests
         run: cabal test all --test-show-details=direct
 
       - name: Referee smoke (modern vs legacy, 1 game)
-        working-directory: santorini
         run: |
           REF=$(cabal list-bin referee)
           MP=$(cabal list-bin modern-player)
