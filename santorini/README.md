@@ -120,7 +120,9 @@ Game 1  (first move: side A)
 - **oldbot** (`Santorini.Legacy.*`): the original course submission's zipper UCT,
   repaired to be adversarial (negamax backup, `1 - reward/visits` exploitation,
   terminal-root guard). It keeps its own game model, so it shares no engine code
-  with `modern` — the referee just drives it as another protocol executable.
+  with `modern` — the referee just drives it as another protocol executable. Like
+  `modern`, it is time-bounded and root-parallel (its own forkIO ensemble, one
+  search tree per core).
 
 ### Tactics note
 

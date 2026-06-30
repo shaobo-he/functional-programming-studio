@@ -17,12 +17,16 @@ the [Utah CS6963 line-delimited JSON protocol](https://users.cs.utah.edu/~mflatt
 plus a **referee** that pits two protocol-speaking player programs against each
 other and logs every move.
 
-- **modern-player** — negamax MCTS + an exact MCTS-Solver + heavy rollouts;
-  time-bounded and multi-core (root-parallel).
-- **legacy-player** — the original course submission, repaired to be
-  negamax-correct (a different game model + a zipper MCTS).
+- **modern-player** — negamax MCTS with an exact MCTS-Solver and heavy rollouts.
+- **legacy-player** — the repaired original course submission: a zipper MCTS
+  (plain UCT, uniform rollouts) on its own game model, made negamax-correct.
 - **referee** — validates every move, enforces a per-move time limit, detects
   win/stalemate, and writes a full transcript.
+
+Both players are **time-bounded** (a per-move budget, not a fixed step count)
+and **multi-core** — each runs a root-parallel ensemble of one search tree per
+CPU core. Modern wins the head-to-head; the edge is the solver + heavy rollouts,
+not parallelism (which both share).
 
 One Cabal project, three executables:
 
