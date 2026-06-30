@@ -8,7 +8,7 @@ import Control.Monad.State.Lazy
 import Data.Aeson
 import Data.Function (on)
 import Data.List (maximumBy)
-import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock (addUTCTime, diffUTCTime, getCurrentTime)
 import System.Environment (lookupEnv)
 import System.IO (stdin, stdout, hFlush)
 import System.IO.Error (isEOFError)
@@ -101,15 +101,24 @@ chooseTimedParallel timeMs gs gen = do
            then gs
            else states !! snd (maximumBy (compare `on` fst) (zip summed [0 ..]))
   where
-    batchSize = 64 :: Int
-    -- a worker grows one tree until the deadline (always at least one batch)
-    worker deadline = loop (mkRootTree gs)
+    -- Adaptive batching: size each batch at ~half the remaining time from the
+    -- measured per-iteration cost (capped at 64), so the search stays within the
+    -- per-move budget instead of overshooting by a whole fixed batch.
+    initialBatch = 8 :: Int
+    maxBatch     = 64 :: Int
+    worker deadline = \g -> loop (mkRootTree gs) g initialBatch
       where
-        loop t g = do
-          let (t', g') = runState (stepRootN batchSize t) g
+        loop t g batch = do
+          t0 <- getCurrentTime
+          let (t', g') = runState (stepRootN batch t) g
           _   <- evaluate (rootForce t')   -- force this batch's search in the worker
           now <- getCurrentTime
-          if now >= deadline then return t' else loop t' g'
+          if now >= deadline then return t' else loop t' g' (nextBatch batch t0 now)
+        nextBatch batch t0 now =
+          let elapsed = realToFrac (diffUTCTime now t0) :: Double
+              perSim  = max 1e-6 (elapsed / fromIntegral (max 1 batch))
+              remain  = realToFrac (diffUTCTime deadline now) :: Double
+          in max 1 (min maxBatch (floor (0.5 * remain / perSim)))
 
 -- read one line, returning Nothing on end of input rather than crashing
 readLine :: IO (Maybe B.ByteString)

@@ -25,8 +25,11 @@ other and logs every move.
 
 Both players are **time-bounded** (a per-move budget, not a fixed step count)
 and **multi-core** — each runs a root-parallel ensemble of one search tree per
-CPU core. Modern wins the head-to-head; the edge is the solver + heavy rollouts,
-not parallelism (which both share).
+CPU core. `legacy` is the *faster* searcher: its uniform rollouts are cheap, so
+it runs more simulations per move. `modern`'s simulations are pricier (the
+MCTS-Solver + heavy rollouts) but smarter, and it wins the head-to-head at every
+budget tested (e.g. 6–0 at 100 ms/move, 10–0 at 1 s/move) — the edge is search
+quality per simulation, not speed or parallelism, which both share.
 
 One Cabal project, three executables:
 

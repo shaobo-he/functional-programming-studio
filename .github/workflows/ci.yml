@@ -58,7 +58,7 @@ jobs:
           REF=$(cabal list-bin referee)
           MP=$(cabal list-bin modern-player)
           LP=$(cabal list-bin legacy-player)
-          timeout 120 "$REF" "$MP" "$LP" 1 100
+          timeout 120 "$REF" "$MP" "$LP" 1 300
 
   sudoku:
     name: Sudoku — Lean proofs + Racket diff

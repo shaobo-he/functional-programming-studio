@@ -132,4 +132,11 @@ winning reply, so a losing move goes unpunished. The **MCTS-Solver** fixes this
 — in a constructed must-defend position, `solver`/`enh` defend 20/20 where
 `base`/`oldbot` defend ~0/20. That (not a logic difference in the negamax) is the
 main reason `modern` beats `oldbot`.
+
+The trade-off: `oldbot` is the *faster* searcher — its uniform rollouts are cheap,
+so it runs many more simulations per move, while `modern` pays for the solver and
+heavy rollouts. `modern` still wins the head-to-head (6–0 at 100 ms/move, 10–0 at
+1 s/move) — its edge is per-simulation quality, not throughput. Both engines size
+their search batches adaptively to stay within the per-move time budget no matter
+how expensive their simulations are.
 ```
