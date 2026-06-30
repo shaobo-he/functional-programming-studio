@@ -1,4 +1,4 @@
-#lang typed/racket
+#lang racket
 
 (require "sudoku.rkt")
 
@@ -6,15 +6,8 @@
 
 ;; re-implementation of http://norvig.com/sudoku.html
 
-(define-type Options (Listof Natural))
-(define-type Grid (Immutable-HashTable Indices Options))
-(define-type MaybeGrid (U False Grid))
-
-(define-type Unit (Listof Indices))
-
 ;(define size (cons 3 3))
 
-(: get/units (-> Indices Indices (Listof Unit)))
 (define get/units
   (λ (indices size)
     (let-indices ([(row-num col-num) size])
@@ -24,57 +17,45 @@
                                   ,(get/col-indices col-index board-size)
                                   ,(get/square-indices indices size)))))))
 
-(: get/peers (-> Indices Indices (Listof Indices)))
 (define get/peers
   (λ (indices size)
     (set->list (set-remove (list->set (let ([all (get/units indices size)])
                                         (append (first all) (append (second all) (third all)))))
                            indices))))
 
-(: get/indices (-> Natural Natural (Listof Indices)))
-(define get/indices
-  (λ (X Y) (combine (build-list X (λ ([x : Natural]) x)) (build-list Y (λ ([x : Natural]) x)))))
+(define get/indices (λ (X Y) (combine (build-list X (λ (x) x)) (build-list Y (λ (x) x)))))
 
-(: solved-grid? (-> Grid Indices Boolean))
 (define solved-grid?
   (λ (grid size)
     (let ([board-size (* (car size) (cdr size))])
-      (andmap (λ ([indices : Indices]) (= (length (hash-ref grid indices)) 1))
+      (andmap (λ (indices) (= (length (hash-ref grid indices)) 1))
               (get/indices board-size board-size)))))
 
-(: solved-grid->string (-> Grid Indices String))
 (define solved-grid->string
   (λ (grid size)
     (let ([board-size (* (car size) (cdr size))])
       (foldr
-       (λ ([row : Natural] [str : String])
+       (λ (row str)
          (string-append
-          (foldr (λ ([col : Natural] [str : String])
+          (foldr (λ (col str)
                    (string-append (number->string (car (hash-ref grid (cons row col)))) " " str))
                  ""
-                 (build-list board-size (λ ([x : Natural]) x)))
+                 (build-list board-size (λ (x) x)))
           "\n"
           str))
        ""
-       (build-list board-size (λ ([x : Natural]) x))))))
+       (build-list board-size (λ (x) x))))))
 
-(: board->grid (-> Board Indices (U False Grid)))
 (define board->grid
   (λ (board size)
     (let-indices
      ([(row-num col-num) (get/board-size board)])
-     (let ([pos
-            :
-            (Listof Indices)
-            (get/indices row-num col-num)])
-       (let ([initial-grid
-              :
-              Grid
-              (foldl (λ ([indices : Indices] [grid : Grid])
-                       (hash-set grid indices (build-list row-num (λ ([x : Natural]) (+ x 1)))))
-                     (hash (cons 0 0) '(0))
-                     pos)])
-         (foldl (λ ([indices : Indices] [grid : (U False Grid)])
+     (let ([pos (get/indices row-num col-num)])
+       (let ([initial-grid (foldl (λ (indices grid)
+                                    (hash-set grid indices (build-list row-num (λ (x) (+ x 1)))))
+                                  (hash (cons 0 0) '(0))
+                                  pos)])
+         (foldl (λ (indices grid)
                   (if (false? grid)
                       #f
                       (let ([board-pos (get/pos board indices)])
@@ -84,35 +65,28 @@
                 initial-grid
                 pos))))))
 
-(: assign (-> Grid Indices Indices Natural MaybeGrid))
 (define assign
   (λ (grid size indices val)
     (let ([other-values (remove val (hash-ref grid indices))])
-      (foldl (λ ([option : Natural] [grid : MaybeGrid])
+      (foldl (λ (option grid)
                (if (false? grid)
                    #f
                    (eliminate grid size indices option)))
              grid
              other-values))))
 
-(: eliminate (-> Grid Indices Indices Natural MaybeGrid))
 (define eliminate
   (λ (grid size indices val)
-    (letrec ([apply/eliminate-rule-1
-              :
-              (-> Grid Natural MaybeGrid)
-              (λ (grid val)
-                (foldl (λ ([peer : Indices] [grid : MaybeGrid])
-                         (if (false? grid)
-                             #f
-                             (eliminate grid size peer val)))
-                       grid
-                       (get/peers indices size)))]
+    (letrec ([apply/eliminate-rule-1 (λ (grid val)
+                                       (foldl (λ (peer grid)
+                                                (if (false? grid)
+                                                    #f
+                                                    (eliminate grid size peer val)))
+                                              grid
+                                              (get/peers indices size)))]
              [apply/eliminate-rule-2
-              :
-              (-> Grid MaybeGrid)
               (λ (grid)
-                (foldl (λ ([unit : Unit] [grid : MaybeGrid])
+                (foldl (λ (unit grid)
                          (if (false? grid)
                              #f
                              (let ([possible-indices
@@ -140,14 +114,11 @@
                           #f
                           (apply/eliminate-rule-2 grid-after-rule-1)))))))))))
 
-(: solve-cp (-> Board Indices MaybeGrid))
 (define solve-cp
   (λ (board size)
-    (call/cc (λ ([k : (-> Grid Grid)])
+    (call/cc (λ (k)
                (let ([board-size (* (car size) (cdr size))])
                  (letrec ([solve-cp-grid
-                           :
-                           (-> Grid MaybeGrid)
                            (λ (grid)
                              (if (solved-grid? grid size)
                                  (k grid)
@@ -158,7 +129,7 @@
                                                                     len
                                                                     (+ board-size 1))))
                                                             (get/indices board-size board-size))])
-                                   (foldl (λ ([val : Natural] result)
+                                   (foldl (λ (val result)
                                             (let ([new-grid (assign grid size best-option val)])
                                               (if (false? new-grid)
                                                   #f
