@@ -89,5 +89,9 @@ jobs:
         working-directory: sudoku/lean
         run: lake build
 
+      - name: Racket unit tests
+        working-directory: sudoku
+        run: raco test tests/*.rkt
+
       - name: Lean vs Racket diff test
         run: bash sudoku/scripts/diff-sudoku.sh

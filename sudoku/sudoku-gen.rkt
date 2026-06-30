@@ -3,6 +3,8 @@
 (require "sudoku.rkt")
 (require "sudoku-cp.rkt")
 
+(provide (all-defined-out))
+
 (define (flip-coin n gen)
   (let ([b (= 0 (random n gen))]) (cons b (current-pseudo-random-generator))))
 

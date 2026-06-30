@@ -9,6 +9,7 @@ sudoku.rkt       Racket: data model, parser, DFS backtracking solver
 sudoku-cp.rkt    Racket: Norvig-style constraint-propagation solver (assign/eliminate + MRV search)
 sudoku-gen.rkt   Racket: puzzle generator built on the CP propagator
 test.rkt         Racket: board fixtures
+tests/           Racket: RackUnit tests for the model, CP solver, and generator
 lean/            Lean 4: a constraint-propagation solver, verified by the type-checker
   Sudoku/CP/     Model, Propagation, Search, IO
   testdata/*.sdk puzzles used by the diff test
@@ -36,6 +37,12 @@ Cross-check both implementations on all test puzzles:
 
 ```
 bash scripts/diff-sudoku.sh
+```
+
+Run the Racket unit tests:
+
+```
+raco test tests/*.rkt
 ```
 
 The Lean solver's correctness is carried by the Lean type-checker — `lake build`
