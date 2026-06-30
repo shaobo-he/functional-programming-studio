@@ -1,4 +1,4 @@
-import Sudoku.NorvigWF
+import Sudoku.CP
 
 def main : IO UInt32 :=
-  Sudoku.NorvigWF.main
+  Sudoku.CP.main

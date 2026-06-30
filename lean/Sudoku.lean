@@ -1,1 +1,1 @@
-import Sudoku.NorvigWF
+import Sudoku.CP
