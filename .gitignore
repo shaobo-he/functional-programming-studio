@@ -1,3 +1,7 @@
 *.hi
 *.o
 *.rkt~
+lean/.lake/
+dist-newstyle/
+compiled/
+referee-log.txt

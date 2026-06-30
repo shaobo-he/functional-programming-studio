@@ -13,12 +13,11 @@ module Santorini (
   mkRandPos,
 ) where
 
-import Control.Monad
 import System.Random
 import qualified Data.HashMap.Strict as DHS (lookup, empty, HashMap, insert, adjust)
-import Data.List (intercalate)
 import Control.Monad.State.Lazy
 import Data.Aeson
+import Data.Aeson.Types (Parser, typeMismatch)
 
 type Pos = (Int, Int)
 type Player = (Pos, Pos)
@@ -31,8 +30,13 @@ data GameState = GameState { getTurn :: Int
                            , getBoard :: Board
                            } deriving (Show)
 
-noPos = (-1,-1)
+noPos :: Pos
+noPos = (-1, -1)
+
+noPlayer :: Player
 noPlayer = (noPos, noPos)
+
+noPlayers :: Players
 noPlayers = (noPlayer, noPlayer)
 
 isDiffPos :: Pos -> Pos -> Bool
@@ -47,41 +51,55 @@ mkRandPos = do
   col <- state $ randomR (1,5)
   return (row, col)
 
--- parsing stuff
+-- ---------------------------------------------------------------------------
+-- Protocol JSON (total parsers; encode is the inverse of decode for 0/1/2
+-- placed players)
+-- ---------------------------------------------------------------------------
 instance FromJSON GameState where
-  parseJSON (Object v) =
-    do
-      turn <- v .: "turn"
-      players <- v .: "players"
-      spaces <- v .: "spaces"
-      return $ GameState turn (parsePlayers players) (boardFromList spaces) where
-    parsePlayers players
-      | length players == 0 = noPlayers
-      | length players == 1 = let player = players !! 0 in
-                                (playerListToTuple player, noPlayer)
-      | length players == 2 = let [player1, player2] = players in
-                                (playerListToTuple player1, playerListToTuple player2) where
-        playerListToTuple [[x1,y1], [x2,y2]] = ((x1,y1), (x2,y2))
+  parseJSON (Object v) = do
+    turn       <- v .: "turn"
+    playersRaw <- v .: "players" :: Parser [[[Int]]]
+    spaces     <- v .: "spaces"
+    players    <- parsePlayers playersRaw
+    return $ GameState turn players (boardFromList spaces)
+    where
+      parsePlayers ps = case ps of
+        []        -> return noPlayers
+        [p1]      -> do a <- playerListToTuple p1
+                        return (a, noPlayer)
+        [p1, p2]  -> do a <- playerListToTuple p1
+                        b <- playerListToTuple p2
+                        return (a, b)
+        _         -> fail "players: expected 0, 1, or 2 players"
+      playerListToTuple p = case p of
+        [[x1, y1], [x2, y2]] -> return ((x1, y1), (x2, y2))
+        _                    -> fail "player: expected two [row,col] workers"
+  parseJSON other = typeMismatch "GameState board object" other
 
 instance ToJSON GameState where
   toJSON (GameState turn players board) =
-    object ["turn" .= turn,
+    object ["turn"    .= turn,
             "players" .= playersToList players,
-            "spaces" .= boardToList board] where
-    playersToList (player1, player2)
-      | isNoPlayer player1 = [playerTupleToList player2]
-      | otherwise = [playerTupleToList player1, playerTupleToList player2]
-    playerTupleToList ((x1,y1), (x2,y2)) = [[x1,y1], [x2,y2]]
+            "spaces"  .= boardToList board]
+    where
+      -- Drop a player whenever EITHER worker slot is the placeholder, so a
+      -- single placed player round-trips back to a one-player array.
+      playersToList (player1, player2)
+        | isNoPlayer player1 && isNoPlayer player2 = []
+        | isNoPlayer player1                       = [playerTupleToList player2]
+        | isNoPlayer player2                       = [playerTupleToList player1]
+        | otherwise = [playerTupleToList player1, playerTupleToList player2]
+      playerTupleToList ((x1,y1), (x2,y2)) = [[x1,y1], [x2,y2]]
 
 getLevel :: Pos -> Board -> Int
 getLevel pos board = case DHS.lookup pos board of
   (Just v) -> v
-  Nothing -> error "pos not in board"
+  Nothing  -> 4   -- off-board / missing cell behaves as a complete tower (wall)
 
 boardFromList :: [[Int]] -> Board
 boardFromList lst = foldl collectRow (DHS.empty::Board) $ zip lst [1..(length lst)] where
   collectRow board (row,rid) = foldl collectCol board $ zip row [1..(length row)] where
-    collectCol board (level,cid) = DHS.insert (rid, cid) level board
+    collectCol b (level,cid) = DHS.insert (rid, cid) level b
 
 boardToList :: Board -> [[Int]]
 boardToList board = [[getLevel (row,col) board | col <- [1..5]] | row <- [1..5]]
@@ -109,35 +127,31 @@ getValidAdjPosns move pos (player1, player2) board = filter validPos
                 posH = getLevel pos board in
                 newPosH <= posH + 1
 
+getValidAdjPosnsToMove, getValidAdjPosnsToBuild :: Pos -> Players -> Board -> [Pos]
 getValidAdjPosnsToMove = getValidAdjPosns True
 getValidAdjPosnsToBuild = getValidAdjPosns False
 
---getValidMoves :: GameState -> [GameState]
 getValidMoves :: GameState -> [(Players, Maybe Pos)]
-getValidMoves GameState {getTurn=turn, getPlayers=players, getBoard=board} =
+getValidMoves GameState {getPlayers=players, getBoard=board} =
   do
     let player = fst players
     (pos, setter) <- zip [fst player, snd player]
-                         [\pos->(pos, snd player), \pos->(fst player, pos)]
+                         [\p->(p, snd player), \p->(fst player, p)]
     newPos <- getValidAdjPosnsToMove pos players board
     let newPlayers = (setter newPos, snd players)
     let buildPosns = if isWinningPos board newPos
                       then [Nothing]
                       else Just <$> (getValidAdjPosnsToBuild newPos newPlayers board)
     buildPos <- buildPosns
-    --return $ GameState
-    --  turn
-    --  newPlayers
-    --  (buildAtPos buildPos board)
     return $ (newPlayers, buildPos)
 
 getValidNextStates :: GameState -> [GameState]
-getValidNextStates gs@(GameState {getTurn=turn, getPlayers=players, getBoard=board}) =
+getValidNextStates gs@(GameState {getTurn=turn, getBoard=board}) =
   let moves = getValidMoves gs in
     updateGameStates <$> moves where
       updateGameStates (players, mpos) = case mpos of
         Just pos -> GameState (turn+1) (switchPlayers players) (buildAtPos pos board)
-        Nothing -> GameState (turn+1) (switchPlayers players) board
+        Nothing  -> GameState (turn+1) (switchPlayers players) board
 
 isWinningPos :: Board -> Pos -> Bool
 isWinningPos board pos = getLevel pos board == 3
@@ -149,30 +163,26 @@ isWinningPlayer board player = (isWinningPos board (fst player)) ||
 switchPlayers :: Players -> Players
 switchPlayers (a,b) = (b,a)
 
--- should be a type class function
+-- | A uniform-random rollout that reports whether the player to move at the
+-- START of the rollout (the candidate node) eventually wins. The perspective
+-- is tracked by the @ref@ flag (True while the current mover equals the
+-- start-mover) and is therefore independent of turn parity -- this is the fix
+-- for the old "global perspective" non-adversarial bug.
 playOut :: GameState -> State StdGen (Bool, GameState)
-playOut gs@(GameState {getTurn=turn, getPlayers=players, getBoard=board}) =
-  let isMyTurn = turn `mod` 2 == 1 in
-    if isWinningPlayer board $ snd players
-      then return $ ((not isMyTurn), gs)
-      else
-        let moves = getValidMoves gs in
-          -- can't move
-          if length moves == 0
-            then return (if isMyTurn then False else True, gs)
-            else
-              -- pick one
-              do
-                chosen <- (moves !!) <$> (state $ randomR (0, (length moves) - 1))
-                case snd chosen of
-                  Just pos -> playOut $
-                                GameState (turn+1) (switchPlayers $ fst chosen) (buildAtPos pos board)
-                  Nothing -> return $ (if isMyTurn then True else False,
-                              GameState (turn+1) (switchPlayers $ fst chosen) board)
-
-main :: IO()
-main = do
-  let gs = GameState 1 (((2,3),(4,4)),((3,5),(2,5))) $
-            boardFromList [[0,0,0,0,2],[1,1,2,0,0],[1,0,0,3,0],[0,0,3,0,0],[0,0,0,1,4]]
-  --putStrLn $ intercalate "\n" $ map show $ getValidMoves gs
-  putStrLn $ show $ runState (playOut gs) $ mkStdGen 200
+playOut start = go True start
+  where
+    go ref gs@(GameState turn players board)
+      -- the player who just moved (now in snd) stepped onto level 3
+      | isWinningPlayer board (snd players) = return (not ref, gs)
+      | otherwise =
+          let moves = getValidMoves gs in
+          if null moves
+            then return (not ref, gs)   -- current mover is stuck and loses
+            else do
+              chosen <- (moves !!) <$> state (randomR (0, length moves - 1))
+              let nextGS = case snd chosen of
+                    Just pos -> GameState (turn+1) (switchPlayers (fst chosen)) (buildAtPos pos board)
+                    Nothing  -> GameState (turn+1) (switchPlayers (fst chosen)) board
+              case snd chosen of
+                Nothing -> return (ref, nextGS)        -- current mover made the winning step
+                Just _  -> go (not ref) nextGS

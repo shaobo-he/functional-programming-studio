@@ -1,0 +1,47 @@
+cabal-version:      2.4
+name:               santorini-arena
+version:            0.1.0.0
+synopsis:           Santorini engines + JSON-protocol referee (Utah CS6963)
+description:        Two Santorini MCTS engines (a modern negamax + MCTS-Solver
+                    engine and a repaired legacy zipper engine) that speak the
+                    course line-delimited JSON protocol, plus a referee that
+                    pits two player programs against each other and logs every
+                    step.
+build-type:         Simple
+
+common warnings
+    ghc-options:      -Wall
+
+library
+    import:           warnings
+    hs-source-dirs:   src
+    exposed-modules:  Santorini.Core
+                      Santorini.Protocol
+                      Santorini.Engine.Modern
+                      Santorini.Search
+                      Santorini.Referee
+    build-depends:    base
+                    , containers
+                    , aeson
+                    , bytestring
+                    , process
+                    , filepath
+                    , time
+                    , unix
+    default-language: Haskell2010
+
+executable modern-player
+    import:           warnings
+    main-is:          ModernPlayer.hs
+    hs-source-dirs:   app
+    build-depends:    base, santorini-arena
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-N"
+    default-language: Haskell2010
+
+executable referee
+    import:           warnings
+    main-is:          Referee.hs
+    hs-source-dirs:   app
+    build-depends:    base, santorini-arena
+    ghc-options:      -O2 -threaded -rtsopts
+    default-language: Haskell2010
