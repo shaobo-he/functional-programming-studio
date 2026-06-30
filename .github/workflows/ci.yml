@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  haskell:
+    name: Haskell (santorini) — build, test, referee smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: '9.6.6'
+          cabal-version: '3.10.3.0'
+
+      - name: Cache cabal store + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cabal/store
+            santorini/dist-newstyle
+          key: cabal-${{ runner.os }}-ghc9.6.6-${{ hashFiles('santorini/santorini.cabal') }}
+          restore-keys: cabal-${{ runner.os }}-ghc9.6.6-
+
+      - name: Build (all components, -Wall)
+        working-directory: santorini
+        run: |
+          cabal update
+          cabal build all
+
+      - name: Unit tests
+        working-directory: santorini
+        run: cabal test all --test-show-details=direct
+
+      - name: Referee smoke (modern vs legacy, 1 game)
+        working-directory: santorini
+        run: |
+          REF=$(cabal list-bin referee)
+          MP=$(cabal list-bin modern-player)
+          LP=$(cabal list-bin legacy-player)
+          timeout 120 "$REF" "$MP" "$LP" 1 100
+
+  sudoku:
+    name: Sudoku — Lean proofs + Racket diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Racket
+        uses: Bogdanp/setup-racket@v1
+        with:
+          version: 'stable'
+          variant: 'CS'
+
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          curl -sSfL https://github.com/leanprover/elan/releases/latest/download/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./elan-init -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Lean build
+        uses: actions/cache@v4
+        with:
+          path: sudoku/lean/.lake
+          key: lean-${{ runner.os }}-${{ hashFiles('sudoku/lean/lean-toolchain', 'sudoku/lean/lake-manifest.json') }}
+          restore-keys: lean-${{ runner.os }}-
+
+      - name: Build Lean (type-checks the proofs)
+        working-directory: sudoku/lean
+        run: lake build
+
+      - name: Lean vs Racket diff test
+        run: bash sudoku/scripts/diff-sudoku.sh

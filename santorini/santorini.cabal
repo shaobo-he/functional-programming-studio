@@ -70,3 +70,12 @@ executable referee
     build-depends:    base, santorini
     ghc-options:      -O2 -threaded -rtsopts
     default-language: Haskell2010
+
+test-suite santorini-test
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Spec.hs
+    hs-source-dirs:   test
+    build-depends:    base, santorini
+    ghc-options:      -threaded
+    default-language: Haskell2010
