@@ -58,8 +58,9 @@ module Santorini.Core
   , rolloutUniform
   ) where
 
+import Data.Bits (complement, shiftL, shiftR, (.&.), (.|.))
 import Data.List (foldl')
-import qualified Data.IntMap.Strict as IM
+import Data.Word (Word64)
 
 -- ----------------------------------------------------------------------------
 -- Minimal State monad (avoids mtl) and a small deterministic RNG (avoids random)
@@ -104,7 +105,11 @@ randomR (lo, hi) g =
 type Pos = (Int, Int)
 type Player = (Pos, Pos)            -- ^ a player's two workers
 type Players = (Player, Player)     -- ^ (player to move, opponent)
-type Board = IM.IntMap Int          -- ^ cell index -> tower level (0..4)
+-- | The 5x5 board packed into two 64-bit words: 25 cells x 3 bits (levels
+-- 0..4). Cells 0..20 live in the low word (21*3 = 63 bits), cells 21..24 in the
+-- high word (4*3 = 12 bits). This replaces a pointer-heavy @IntMap Int@ with a
+-- flat, allocation-cheap value whose equality is two word compares.
+data Board = Board !Word64 !Word64 deriving (Eq, Show)
 
 -- | Row/col (1..5) to a dense 0..24 board index.
 pix :: Pos -> Int
@@ -116,30 +121,48 @@ data GameState = GameState
   , getBoard   :: Board
   } deriving (Eq, Show)
 
--- | Tower level at a position. The board is always full (25 cells), so a miss
--- means an out-of-range query: treat it as a complete-tower wall rather than
--- crashing, which keeps every caller total.
+-- Low-level 3-bit cell access on the packed board. @i@ is a dense 0..24 index;
+-- callers of setCell/cellAt guarantee that range (getLevel guards it). Cells
+-- 0..20 sit at bit @i*3@ of the low word, 21..24 at bit @(i-21)*3@ of the high
+-- word, so the widest shift is 60 and never overflows a 64-bit word.
+cellAt :: Int -> Board -> Int
+cellAt i (Board lo hi)
+  | i <= 20   = fromIntegral ((lo `shiftR` (i * 3)) .&. 7)
+  | otherwise = fromIntegral ((hi `shiftR` ((i - 21) * 3)) .&. 7)
+
+setCell :: Int -> Int -> Board -> Board
+setCell i v (Board lo hi)
+  | i <= 20   = Board ((lo .&. complement (7 `shiftL` s)) .|. (w `shiftL` s)) hi
+  | otherwise = Board lo ((hi .&. complement (7 `shiftL` t)) .|. (w `shiftL` t))
+  where
+    s = i * 3
+    t = (i - 21) * 3
+    w = fromIntegral v :: Word64
+
+-- | Tower level at a position. The board is always full (25 cells), so an
+-- out-of-range query (an off-board neighbour) is treated as a complete-tower
+-- wall rather than crashing, which keeps every caller total.
 getLevel :: Pos -> Board -> Int
-getLevel pos board = IM.findWithDefault 4 (pix pos) board
+getLevel pos board = let i = pix pos in if i < 0 || i > 24 then 4 else cellAt i board
 
 boardFromList :: [[Int]] -> Board
-boardFromList lst = foldl collectRow IM.empty $ zip lst [1 ..]
+boardFromList lst = foldl collectRow emptyBoard $ zip lst [1 ..]
   where
     collectRow board (row, rid) = foldl collectCol board $ zip row [1 ..]
-      where collectCol b (level, cid) = IM.insert (pix (rid, cid)) level b
+      where collectCol b (level, cid) = setCell (pix (rid, cid)) level b
 
 -- | The board as a 5x5 row-major list of levels (the protocol \"spaces\" field).
 boardToList :: Board -> [[Int]]
 boardToList board = [ [ getLevel (r, c) board | c <- [1 .. 5] ] | r <- [1 .. 5] ]
 
 buildAtPos :: Pos -> Board -> Board
-buildAtPos pos = IM.adjust (+ 1) (pix pos)
+buildAtPos pos b = let i = pix pos in setCell i (cellAt i b + 1) b
 
 emptyBoard :: Board
-emptyBoard = boardFromList (replicate 5 (replicate 5 0))
+emptyBoard = Board 0 0
 
 setLevels :: [(Pos, Int)] -> Board -> Board
-setLevels xs b = foldl (\acc (p, l) -> IM.insert (pix p) l acc) b xs
+setLevels xs b = foldl (\acc (p, l) -> setCell (pix p) l acc) b xs
 
 -- ----------------------------------------------------------------------------
 -- Rules
