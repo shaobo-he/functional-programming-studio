@@ -13,7 +13,7 @@
 --   * the move sampler / rollouts live once in "Santorini.Core" (no duplication).
 module Santorini.Engine.Modern
   ( Engine(..)
-  , base, enh, enhUnbiased, heavyOnly, solverOnly
+  , base, enh, enhUcb, enhUnbiased, heavyOnly, solverOnly
   , lookupModern
   , chooseMove
     -- * Anytime / resumable interface (for the time-bounded parallel driver)
@@ -50,19 +50,23 @@ data Engine = Engine
   { useSolver :: !Bool
   , useHeavy :: !Bool
   , useBias :: !Bool
+  , usePuct :: !Bool   -- prior-directed PUCT + FPU selection (else progressive-bias UCB)
   }
 
-base, enh, enhUnbiased, heavyOnly, solverOnly :: Engine
-base        = Engine False False False -- plain negamax UCT + uniform rollouts
-enh         = Engine True  True  True  -- solver + heavy rollouts + progressive bias
-enhUnbiased = Engine True  True  False -- ablation: shared WU-UCT without bias
-heavyOnly   = Engine False True  True  -- ablation: heavy rollouts + bias
-solverOnly  = Engine True  False False -- ablation: solver only
+base, enh, enhUcb, enhUnbiased, heavyOnly, solverOnly :: Engine
+base        = Engine False False False False -- plain negamax UCT + uniform rollouts
+enh         = Engine True  True  True  True  -- solver + heavy + prior-directed PUCT/FPU (default)
+enhUcb      = Engine True  True  True  False -- ablation: progressive-bias UCB (pre-PUCT default)
+enhUnbiased = Engine True  True  False False -- ablation: shared WU-UCT without bias
+heavyOnly   = Engine False True  True  False -- ablation: heavy rollouts + bias
+solverOnly  = Engine True  False False False -- ablation: solver only
 
 lookupModern :: String -> Maybe Engine
 lookupModern nm = case nm of
   "base"   -> Just base
   "enh"    -> Just enh
+  "enh-ucb"  -> Just enhUcb
+  "enh-puct" -> Just enh    -- alias: PUCT is now the default enh
   "enh-unbiased" -> Just enhUnbiased
   "heavy"  -> Just heavyOnly
   "solver" -> Just solverOnly
@@ -233,7 +237,47 @@ ucbC = sqrt 2
 -- | UCT child selection. Reward is stored from the child mover's perspective,
 -- so exploitation for THIS node is @1 - reward/visits@ (negamax).
 selectChild :: Engine -> Int -> Int -> Array Int MNode -> St Gen Int
-selectChild eng parentVisits parentPending kids =
+selectChild eng parentVisits parentPending kids
+  | usePuct eng = puctSelect eng parentVisits parentPending kids
+  | otherwise   = ucbSelect eng parentVisits parentPending kids
+
+-- Prior-directed PUCT with first-play urgency: score each child q + U, where
+-- U = cpuct * P(c) * sqrt(parent N+O) / (1 + child N+O), P is a softmax over the
+-- static positional prior, and q is the negamax win-rate (FPU for unvisited
+-- children). Unlike 'ucbSelect' it does NOT force one visit of every child
+-- first, so search concentrates on high-prior moves. Exploitation stays N-only;
+-- exploration and the parent count use N+O (WU-UCT); proven wins stay masked.
+puctSelect :: Engine -> Int -> Int -> Array Int MNode -> St Gen Int
+puctSelect eng parentVisits parentPending kids =
+  let pairs = zip [0 ..] (kidsList kids)
+      maxPrior = fromIntegral (maximum (map (mPrior . snd) pairs)) :: Double
+      weight c = exp ((fromIntegral (mPrior c) - maxPrior) / puctPriorTemp)
+      z = sum [ weight c | (_, c) <- pairs ]
+      sqrtParent = sqrt (fromIntegral (max 1 (parentVisits + parentPending))) :: Double
+      score c
+        | useSolver eng && mProven c == PWin = -1e18   -- never steer into the opponent's proven win
+        | otherwise =
+            let observed = mVisits c
+                q | observed == 0 = puctFpu
+                  | otherwise = 1 - fromIntegral (mReward c) / fromIntegral observed
+                p = weight c / z
+                u = puctC * p * sqrtParent / fromIntegral (1 + observed + mPending c)
+            in q + u
+      scored = [ (i, score c) | (i, c) <- pairs ]
+      best = maximum (map snd scored)
+      bestIdx = [ i | (i, s) <- scored, s == best ]
+  in case bestIdx of
+       [only] -> pure only
+       _      -> uniformPick bestIdx
+
+-- PUCT tuning constants (starting points; tune by self-play).
+puctC, puctFpu, puctPriorTemp :: Double
+puctC = 1.5          -- exploration weight (cf. ucbC = sqrt 2 for ucbSelect)
+puctFpu = 0.45       -- first-play urgency: assumed win-rate of an unvisited child
+puctPriorTemp = 120  -- softmax temperature over the static positional prior
+
+ucbSelect :: Engine -> Int -> Int -> Array Int MNode -> St Gen Int
+ucbSelect eng parentVisits parentPending kids =
   let pairs = zip [0 ..] (kidsList kids)   -- (index, child); no (!!) re-indexing
       unseen =
         [ (i, c)
