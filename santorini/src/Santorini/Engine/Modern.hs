@@ -34,6 +34,7 @@ module Santorini.Engine.Modern
   , reuseRoot
   ) where
 
+import Data.Array (Array, listArray, elems, bounds, (!), (//))
 import Data.Function (on)
 import Data.List (foldl', maximumBy)
 
@@ -73,9 +74,10 @@ data Proven = PU | PWin | PLoss deriving (Eq, Show)
 
 terminalPV :: GameState -> Proven
 terminalPV s
-  | moverWon s      = PLoss
-  | moveCount s == 0 = PLoss
-  | otherwise       = PU
+  | moverWon s = PLoss   -- opponent already stepped onto level 3 (O(1) check)
+  | otherwise  = PU      -- a stalemate (no legal moves) is proven when this node
+                         -- is expanded: reserveAt/simulate mark empty kids PLoss,
+                         -- so we skip the O(#moves) moveCount here (per-child cost).
 
 -- | I (the mover) win if any of my moves hands the opponent a proven loss;
 -- I lose if every move I have leaves the opponent proven winning.
@@ -102,12 +104,25 @@ data MNode = MNode
   , mPending :: {-# UNPACK #-} !Int
   , mPrior :: {-# UNPACK #-} !Int
   , mProven :: !Proven
-  , mKids   :: !(Maybe [MNode])
+  , mKids   :: !(Maybe (Array Int MNode))
   }
 
 -- | A rollout reserved in the shared tree. The path contains stable child
 -- indices from the root to the leaf; child ordering never changes.
 data RolloutJob = RolloutJob !GameState ![Int]
+
+-- Children live in a 0-indexed immutable array so selection/backup index in
+-- O(1) (the old list rebuilt with splitAt + (before ++ x : after) and indexed
+-- with (!!), i.e. O(#children) per node per op). Array order never changes, so
+-- RolloutJob's stable child-index paths stay valid across reserve/finish/cancel.
+mkKids :: [MNode] -> Array Int MNode
+mkKids ks = listArray (0, length ks - 1) ks
+
+kidsList :: Array Int MNode -> [MNode]
+kidsList = elems
+
+nullKids :: Array Int MNode -> Bool
+nullKids ks = case bounds ks of (lo, hi) -> hi < lo
 
 -- | Rollout policy for an engine: rule-guided when heavy, else uniform.
 policyFor :: Engine -> Policy
@@ -183,45 +198,44 @@ bump x n = n { mVisits = mVisits n + 1, mReward = mReward n + x }
 simulate :: Engine -> MNode -> St Gen (Int, MNode)
 simulate _ n
   | moverWon (mState n) = pure (0, bump 0 n)   -- opponent already stepped onto level 3
-  | Just [] <- mKids n  = pure (0, bump 0 n)   -- stalemate: mover has no moves -> lost
+  | Just ks <- mKids n, nullKids ks = pure (0, bump 0 n)  -- stalemate: no moves -> lost
   | mProven n == PWin   = pure (1, bump 1 n)
   | mProven n == PLoss  = pure (0, bump 0 n)
 simulate eng n@(MNode s r v _ _ _ Nothing) =
   let nexts = getValidNextStates s
   in if null nexts
        then pure (0, n { mProven = if useSolver eng then PLoss else PU
-                       , mKids = Just [], mVisits = v + 1, mReward = r })
+                       , mKids = Just (mkKids []), mVisits = v + 1, mReward = r })
        else do
          won <- rollout (policyFor eng) s
          let v0   = if won then 1 else 0
              kids = map (mkChild eng) nexts
              pv   = if useSolver eng then aggregatePV kids else PU
-         pure (provenOr pv v0, n { mKids = Just kids, mVisits = v + 1, mReward = r + v0, mProven = pv })
+         pure (provenOr pv v0, n { mKids = Just (mkKids kids), mVisits = v + 1, mReward = r + v0, mProven = pv })
 simulate eng n@(MNode _ r v pending _ _ (Just kids)) = do
   i <- selectChild eng v pending kids
-  case splitAt i kids of
-    (before, selected : after) -> do
-      (vChild, kid') <- simulate eng selected
-      let kids' = before ++ kid' : after
-          vSelf = 1 - vChild
-          pv
-            | not (useSolver eng) = PU
-            | mProven kid' == PLoss = PWin
-            | mProven kid' == PWin && all ((== PWin) . mProven) kids' = PLoss
-            | otherwise = PU
-      pure (provenOr pv vSelf, n { mKids = Just kids', mVisits = v + 1, mReward = r + vSelf, mProven = pv })
-    _ -> error "simulate: selected child index out of range"
+  let selected = kids ! i
+  (vChild, kid') <- simulate eng selected
+  let kids' = kids // [(i, kid')]
+      vSelf = 1 - vChild
+      pv
+        | not (useSolver eng) = PU
+        | mProven kid' == PLoss = PWin
+        | mProven kid' == PWin && all ((== PWin) . mProven) (kidsList kids') = PLoss
+        | otherwise = PU
+  pure (provenOr pv vSelf, n { mKids = Just kids', mVisits = v + 1, mReward = r + vSelf, mProven = pv })
 
 ucbC :: Double
 ucbC = sqrt 2
 
 -- | UCT child selection. Reward is stored from the child mover's perspective,
 -- so exploitation for THIS node is @1 - reward/visits@ (negamax).
-selectChild :: Engine -> Int -> Int -> [MNode] -> St Gen Int
+selectChild :: Engine -> Int -> Int -> Array Int MNode -> St Gen Int
 selectChild eng parentVisits parentPending kids =
-  let unseen =
-        [ i
-        | (i, c) <- zip [0 ..] kids
+  let pairs = zip [0 ..] (kidsList kids)   -- (index, child); no (!!) re-indexing
+      unseen =
+        [ (i, c)
+        | (i, c) <- pairs
         , mVisits c + mPending c == 0
         , not (useSolver eng && mProven c == PWin)
         ]
@@ -241,22 +255,22 @@ selectChild eng parentVisits parentPending kids =
                      | observed == 0 = 0.5
                      | otherwise = 1 - fromIntegral (mReward c) / fromIntegral observed
                in exploitation + ucbC * sqrt (lpv / fromIntegral total) + bias c
-      go !_ [] !bestIndex !_ = bestIndex
-      go !i (c : cs) !bestIndex !bestScore =
-        let score = pr c
-        in if score >= bestScore
-             then go (i + 1) cs i score
-             else go (i + 1) cs bestIndex bestScore
+      scored = [ (i, pr c) | (i, c) <- pairs ]
+      best = maximum (map snd scored)
+      -- Break exact-tie UCB scores uniformly at random instead of always taking
+      -- the last child: the old `score >= bestScore` fold biased selection
+      -- toward worker-2 steps and later build cells (moveEntries order).
+      bestSeen = [ i | (i, s) <- scored, s == best ]
       bestUnseen
-        | not (useBias eng) = unseen
+        | not (useBias eng) = map fst unseen
         | otherwise =
-            let bestPrior = maximum (map (mPrior . (kids !!)) unseen)
-            in filter ((== bestPrior) . mPrior . (kids !!)) unseen
+            let bestPrior = maximum (map (mPrior . snd) unseen)
+            in [ i | (i, c) <- unseen, mPrior c == bestPrior ]
   in if not (null unseen)
        then uniformPick bestUnseen
-       else case kids of
-              [] -> error "selectChild: empty children"
-              c : cs -> pure (go 1 cs 0 (pr c))
+       else case bestSeen of
+              [only] -> pure only          -- unique argmax: no RNG draw (as before)
+              _      -> uniformPick bestSeen
 
 runSims :: Engine -> Int -> MNode -> St Gen MNode
 runSims _   0 n = pure n
@@ -296,23 +310,22 @@ reserveRollout eng root
             | not (useSolver eng) = PU
             | null kids = PLoss
             | otherwise = aggregatePV kids
-          n' = n { mPending = mPending + 1, mProven = pv, mKids = Just kids }
+          n' = n { mPending = mPending + 1, mProven = pv, mKids = Just (mkKids kids) }
       in pure (Just (RolloutJob mState []), n')
-    reserveAt n@MNode{mState, mPending, mKids = Just []} =
-      pure (Just (RolloutJob mState []), n { mPending = mPending + 1 })
-    reserveAt n@MNode{mVisits, mPending, mKids = Just kids} = do
-      i <- selectChild eng mVisits mPending kids
-      case splitAt i kids of
-        (before, selected : after) -> do
+    reserveAt n@MNode{mState, mVisits, mPending, mKids = Just kids}
+      | nullKids kids =
+          pure (Just (RolloutJob mState []), n { mPending = mPending + 1 })
+      | otherwise = do
+          i <- selectChild eng mVisits mPending kids
+          let selected = kids ! i
           (job, selected') <- reserveAt selected
-          let kids' = before ++ selected' : after
-              pv = if useSolver eng then aggregatePV kids' else PU
+          let kids' = kids // [(i, selected')]
+              pv = if useSolver eng then aggregatePV (kidsList kids') else PU
               n' = n { mKids = Just kids', mProven = pv }
           pure $ case job of
             Nothing -> (Nothing, n')
             Just (RolloutJob state path) ->
               (Just (RolloutJob state (i : path)), n' { mPending = mPending + 1 })
-        _ -> error "reserveRollout: selected child index out of range"
 
 -- | Evaluate a reserved leaf. The result is from the leaf mover's perspective.
 runRolloutJob :: Engine -> RolloutJob -> St Gen Int
@@ -332,12 +345,12 @@ finishRollout eng (RolloutJob _ path) value root = snd (finishAt path value root
             }
       in (provenOr (mProven n') leafValue, n')
     finishAt (i : rest) leafValue n =
-      case splitAt i (childrenOf n) of
-        (before, selected : after) ->
-          let (childValue, selected') = finishAt rest leafValue selected
-              kids' = before ++ selected' : after
+      case mKids n of
+        Just kids ->
+          let (childValue, selected') = finishAt rest leafValue (kids ! i)
+              kids' = kids // [(i, selected')]
               selfValue = 1 - childValue
-              pv = if useSolver eng then aggregatePV kids' else PU
+              pv = if useSolver eng then aggregatePV (kidsList kids') else PU
               n' = n
                 { mPending = mPending n - 1
                 , mVisits = mVisits n + 1
@@ -346,7 +359,7 @@ finishRollout eng (RolloutJob _ path) value root = snd (finishAt path value root
                 , mKids = Just kids'
                 }
           in (provenOr pv selfValue, n')
-        _ -> error "finishRollout: reserved child index out of range"
+        Nothing -> error "finishRollout: reserved child index out of range"
 
 -- | Remove a reservation whose worker failed, without inventing a result.
 cancelRollout :: RolloutJob -> MNode -> MNode
@@ -354,13 +367,13 @@ cancelRollout (RolloutJob _ path) = cancelAt path
   where
     cancelAt [] n = n { mPending = mPending n - 1 }
     cancelAt (i : rest) n =
-      case splitAt i (childrenOf n) of
-        (before, selected : after) ->
+      case mKids n of
+        Just kids ->
           n
             { mPending = mPending n - 1
-            , mKids = Just (before ++ cancelAt rest selected : after)
+            , mKids = Just (kids // [(i, cancelAt rest (kids ! i))])
             }
-        _ -> error "cancelRollout: reserved child index out of range"
+        Nothing -> error "cancelRollout: reserved child index out of range"
 
 -- | Select the robust child while respecting exact proofs and the immediate
 -- tactical guard. Shared-tree search returns this node for reuse next turn.
@@ -413,9 +426,9 @@ rootSettled eng n = useSolver eng && mProven n /= PU
 -- rollout is dispatched or the tree is returned to the protocol loop.
 forceTreeStats :: MNode -> Int
 forceTreeStats t =
-  let cs = maybe [] id (mKids t)
+  let cs = maybe [] kidsList (mKids t)
   in mVisits t + mPending t + sum (map mVisits cs)
        + length (filter ((/= PU) . mProven) cs)
 
 childrenOf :: MNode -> [MNode]
-childrenOf = maybe [] id . mKids
+childrenOf = maybe [] kidsList . mKids

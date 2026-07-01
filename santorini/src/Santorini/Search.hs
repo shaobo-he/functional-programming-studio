@@ -99,7 +99,10 @@ growShared eng thinkMs requestedWorkers seed root = do
           let ((job, tree'), selectionGen') = runSt (reserveRollout eng tree) selectionGen
           case job of
             Just rolloutJob -> do
-              _ <- evaluate (forceTreeStats tree')
+              -- No per-reserve forceTreeStats: the strict node stats are forced
+              -- once per completed rollout in drainOrFinish, and the next
+              -- reserve's selectChild descent forces the freshly reserved path,
+              -- so forcing here is redundant serial work on the coordinator.
               writeChan jobs (Run rolloutJob)
               coordinate deadline capacity jobs results tree' selectionGen' (inFlight + 1)
             Nothing -> drainOrFinish deadline capacity jobs results tree' selectionGen' inFlight
