@@ -1,80 +1,152 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Time-bounded, root-parallel, anytime search driver (the IO boundary that
--- turns the pure 'Engine.Modern' search into a player move under a wall-clock
--- budget). One worker thread per capability grows its own tree until a shared
--- deadline; the trees are then combined by summed root-child visits.
+-- | Time-bounded WU-UCT-style shared-tree search. One coordinator owns the
+-- persistent tree and performs selection/backpropagation sequentially. Worker
+-- threads only evaluate pure rollouts, so no tree node is concurrently mutated.
 module Santorini.Search
   ( timedParallel
+  , timedShared
   , workerCount
   ) where
 
 import Control.Concurrent (forkIO, getNumCapabilities)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (SomeException, evaluate, try)
-import Control.Monad (forM)
-import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
+import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (SomeException, evaluate, finally, try)
+import Control.Monad (forM, replicateM_)
+import Data.List (foldl')
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 
 import Santorini.Core
 import Santorini.Engine.Modern
-  (Engine, MNode, advance, combineRoots, forceTreeStats, mkRoot, nodeVisits, rootSettled)
+  ( Engine
+  , MNode
+  , RolloutJob
+  , cancelRollout
+  , chooseRootChild
+  , finishRollout
+  , forceTreeStats
+  , nodeState
+  , reserveRollout
+  , reuseRoot
+  , rootSettled
+  , runRolloutJob
+  )
 
--- | Number of OS-thread capabilities the RTS was given (i.e. cores with -N).
+data Work = Run !RolloutJob | Stop
+type Result = (RolloutJob, Either SomeException Int)
+
+-- | Number of OS-thread capabilities the RTS was given. Benchmarking may show
+-- that a CPU-heavy rollout policy is better with fewer workers than SMT threads.
 workerCount :: IO Int
 workerCount = getNumCapabilities
 
--- | Choose a move for @s@ with @engine@, thinking for about @thinkMs@
--- milliseconds across @threads@ independent trees (one per core).
+-- | Compatibility wrapper for stateless callers. Production uses 'timedShared'
+-- so the selected subtree survives across protocol turns.
 timedParallel :: Engine -> Int -> Int -> GameState -> IO GameState
-timedParallel eng thinkMs threads s = do
-  now <- getCurrentTime
-  let deadline = addUTCTime (fromIntegral (max 1 thinkMs) / 1000) now
-      n        = max 1 threads
-      seeds    = [ mkGen (i * 2654435761 + 1009) | i <- [1 .. n] ]
-  mvars <- forM seeds $ \g -> do
-    mv <- newEmptyMVar
-    _  <- forkIO $ do
-            r <- try (worker eng deadline g s)
-            putMVar mv $ case r of
-              Right t                  -> t
-              Left (_ :: SomeException) -> mkRoot eng s
-    pure mv
-  trees <- mapM takeMVar mvars
-  pure (combineRoots eng trees s)
+timedParallel eng thinkMs workers state =
+  fst <$> timedShared eng thinkMs workers Nothing state
 
--- | Grow one tree until the deadline, forcing each batch so the work happens
--- here (in the worker) rather than lazily later in the combine.
---
--- The batch size is adaptive: after each batch we measure its per-simulation
--- cost and size the next batch to about half the remaining time. A cheap engine
--- (uniform rollouts) runs large batches; an expensive one (heavy rollouts + the
--- solver) runs small ones — so both honour a tight per-move budget instead of
--- overshooting by a whole fixed 64-sim batch. Batch-first (a small initial
--- batch, run before the first clock check) still guarantees the root is
--- expanded for 'combineRoots'.
-worker :: Engine -> UTCTime -> Gen -> GameState -> IO MNode
-worker eng deadline g0 s = go (mkRoot eng s) g0 initialBatch
+-- | Search one position using a shared logical tree. A cached root is reused
+-- when it matches the position or contains the opponent's reply as a child.
+timedShared
+  :: Engine
+  -> Int
+  -> Int
+  -> Maybe MNode
+  -> GameState
+  -> IO (GameState, Maybe MNode)
+timedShared eng thinkMs workers cached state = do
+  let root = reuseRoot eng state cached
+  searched <- growShared eng thinkMs workers (stateSeed state) root
+  case chooseRootChild eng searched of
+    Just child -> pure (nodeState child, Just child)
+    Nothing -> case getValidNextStates state of
+      next : _ -> pure (next, Nothing)
+      [] -> pure (state, Nothing)
+
+growShared :: Engine -> Int -> Int -> Int -> MNode -> IO MNode
+growShared eng thinkMs requestedWorkers seed root = do
+  jobs <- newChan
+  results <- newChan
+  let n = max 1 requestedWorkers
+      workerSeeds = [mkGen (seed + i * 2654435761 + 1009) | i <- [1 .. n]]
+  done <- forM workerSeeds $ \workerSeed -> do
+    stopped <- newEmptyMVar
+    _ <- forkIO (rolloutWorker eng workerSeed jobs results stopped)
+    pure stopped
+  start <- getCurrentTime
+  let deadline = addUTCTime (fromIntegral (max 1 thinkMs) / 1000) start
+  searched <- coordinate deadline n jobs results root (mkGen (seed + 104729)) 0
+  replicateM_ n (writeChan jobs Stop)
+  mapM_ takeMVar done
+  _ <- evaluate (forceTreeStats searched)
+  pure searched
   where
-    initialBatch = 8 :: Int
-    go tree g batch = do
-      t0 <- getCurrentTime
-      let (tree', g') = runSt (advance eng batch tree) g
-      _   <- evaluate (nodeVisits tree')          -- run this batch of sims here, in the worker
+    coordinate
+      :: UTCTime
+      -> Int
+      -> Chan Work
+      -> Chan Result
+      -> MNode
+      -> Gen
+      -> Int
+      -> IO MNode
+    coordinate deadline capacity jobs results tree selectionGen inFlight = do
       now <- getCurrentTime
-      if now >= deadline || rootSettled eng tree'
-        then done tree'
-        else go tree' g' (nextBatch batch t0 now)
-    -- Aim each batch at ~half the remaining time, but cap it: a fast batch can
-    -- underestimate per-sim cost, and an uncapped target would then run a giant
-    -- batch that blows the budget (and trips the referee's hard limit). 64 is
-    -- the original fixed batch size, which never overshot beyond the grace
-    -- margin; adaptivity only ever shrinks below it for tight budgets.
-    maxBatch = 64 :: Int
-    nextBatch batch t0 now =
-      let elapsed = realToFrac (diffUTCTime now t0) :: Double   -- seconds for `batch` sims
-          perSim  = max 1e-6 (elapsed / fromIntegral (max 1 batch))
-          remain  = realToFrac (diffUTCTime deadline now) :: Double
-      in max 1 (min maxBatch (floor (0.5 * remain / perSim)))
-    done tree = do
-      _ <- evaluate (forceTreeStats tree)         -- realise child stats for combine
-      pure tree
+      if inFlight < capacity && now < deadline && not (rootSettled eng tree)
+        then do
+          let ((job, tree'), selectionGen') = runSt (reserveRollout eng tree) selectionGen
+          case job of
+            Just rolloutJob -> do
+              _ <- evaluate (forceTreeStats tree')
+              writeChan jobs (Run rolloutJob)
+              coordinate deadline capacity jobs results tree' selectionGen' (inFlight + 1)
+            Nothing -> drainOrFinish deadline capacity jobs results tree' selectionGen' inFlight
+        else drainOrFinish deadline capacity jobs results tree selectionGen inFlight
+
+    drainOrFinish deadline capacity jobs results tree selectionGen inFlight
+      | inFlight == 0 = pure tree
+      | otherwise = do
+          (job, outcome) <- readChan results
+          let tree' = case outcome of
+                Right value -> finishRollout eng job value tree
+                Left _ -> cancelRollout job tree
+          _ <- evaluate (forceTreeStats tree')
+          coordinate deadline capacity jobs results tree' selectionGen (inFlight - 1)
+
+rolloutWorker
+  :: Engine
+  -> Gen
+  -> Chan Work
+  -> Chan Result
+  -> MVar ()
+  -> IO ()
+rolloutWorker eng = go
+  where
+    go gen jobs results stopped =
+      loop gen `finally` putMVar stopped ()
+      where
+        loop currentGen = do
+          work <- readChan jobs
+          case work of
+            Stop -> pure ()
+            Run job -> do
+              let (value, nextGen) = runSt (runRolloutJob eng job) currentGen
+              outcome <- try (evaluate value)
+              writeChan results (job, outcome)
+              loop nextGen
+
+-- Keep searches reproducible while avoiding the same random streams on every
+-- turn. Equal positions still receive equal streams, which is useful in tests.
+stateSeed :: GameState -> Int
+stateSeed (GameState turn ((a, b), (c, d)) board) =
+  foldl' mix turn (concatMap pos [a, b, c, d] ++ concat (boardToList board))
+  where
+    pos (r, col) = [r, col]
+    -- The 32-bit FNV prime is only a convenient odd mixing multiplier here;
+    -- this is not intended to be the FNV hash algorithm.
+    mix h x = h * seedMixPrime + x
+
+seedMixPrime :: Int
+seedMixPrime = 16777619

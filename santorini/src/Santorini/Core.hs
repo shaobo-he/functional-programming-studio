@@ -114,7 +114,7 @@ data GameState = GameState
   { getTurn    :: Int
   , getPlayers :: Players
   , getBoard   :: Board
-  } deriving (Show)
+  } deriving (Eq, Show)
 
 -- | Tower level at a position. The board is always full (25 cells), so a miss
 -- means an out-of-range query: treat it as a complete-tower wall rather than

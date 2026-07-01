@@ -21,7 +21,7 @@ src/Santorini/
   Core.hs            modern game model: rules, IntMap board, self-contained RNG, sampler + rollout
   Protocol.hs        line-delimited JSON <-> GameState, placement handshake, the player I/O loop
   Engine/Modern.hs   negamax MCTS + MCTS-Solver + heavy rollouts
-  Search.hs          time-bounded, root-parallel (multi-core) anytime driver
+  Search.hs          time-bounded shared-tree WU-UCT-style rollout driver
   Referee.hs         spawns two players, validates moves, enforces a time limit, logs every step
   Legacy/
     Game.hs          repaired original engine: game model + negamax rollout (own HashMap model)
@@ -140,9 +140,10 @@ A player program takes **no command-line arguments**. Each move is budgeted by
 *time*, not step count: the per-move think budget (milliseconds) is read from the
 `SANTORINI_TIME_MS` environment variable (default 1000). Both players run an
 anytime search to that deadline across **all cores** (built with `-threaded
--with-rtsopts=-N`; one worker tree per capability, combined by summed root-child
-visits — ~9× wall-clock speedup on a 12-core box). Cap cores at runtime with
-`GHCRTS=-N4`.
+-with-rtsopts=-N`). The modern player has one persistent logical tree: a
+coordinator performs selection and backup, and worker threads evaluate rollouts
+in parallel. Set `SANTORINI_WORKERS=6` to control only modern rollout workers or
+`GHCRTS=-N6` to cap all Haskell execution.
 
 ## Run a match
 
@@ -194,8 +195,17 @@ Game 1  (first move: side A)
 
 - **modern** (`Santorini.Engine.Modern`): recursive negamax UCT (one negation
   per ply), an exact MCTS-Solver (proves forced wins/losses and short-circuits),
-  heavy rule-guided rollouts. Variants: `base` (plain negamax UCT), `enh`
-  (solver + heavy, the default player), `heavy`, `solver`.
+  positional rule-guided rollouts. Its WU-UCT-style shared-tree driver counts
+  outstanding rollouts during selection, but updates values only when those
+  rollouts complete. One coordinator owns the immutable tree while pure rollout
+  workers run in parallel, so there is no shared mutation. The selected subtree
+  is retained across protocol turns. A decaying positional prior orders early
+  expansion, while completed rollout values dominate as visits accumulate. Root
+  choice preserves exact proofs and rejects moves that allow an immediate
+  winning reply when a safe move exists. Variants: `base` (plain negamax UCT),
+  `enh` (solver + heavy + prior, the default player), `enh-unbiased` (shared-tree
+  ablation without the prior), `heavy`, `solver`. Set `SANTORINI_ENGINE` to a
+  variant name.
 - **oldbot** (`Santorini.Legacy.*`): the original course submission's zipper UCT,
   repaired to be adversarial (negamax backup, `1 - reward/visits` exploitation,
   terminal-root guard). It keeps its own game model, so it shares no engine code
@@ -205,17 +215,25 @@ Game 1  (first move: side A)
 
 ### Tactics note
 
-Plain rollout MCTS (the `base` variant and `oldbot`) is tactically blind at high
-branching: a uniform rollout almost never makes the opponent take its single
-winning reply, so a losing move goes unpunished. The **MCTS-Solver** fixes this
-— in a constructed must-defend position, `solver`/`enh` defend 20/20 where
-`base`/`oldbot` defend ~0/20. That (not a logic difference in the negamax) is the
-main reason `modern` beats `oldbot`.
+Plain rollout MCTS is tactically weak at high branching: a uniform rollout may
+almost never make the opponent take its single winning reply, so a losing move
+goes unpunished. The modern engine now rejects any root move that permits an
+immediate winning reply when a safe move exists. The **MCTS-Solver** handles the
+deeper case by propagating exact forced wins and losses through the tree; the
+parallel combiner retains those proofs across all worker roots.
 
 The trade-off: `oldbot` is the *faster* searcher — its uniform rollouts are cheap,
 so it runs many more simulations per move, while `modern` pays for the solver and
-heavy rollouts. `modern` still wins the head-to-head (6–0 at 100 ms/move, 10–0 at
-1 s/move) — its edge is per-simulation quality, not throughput. Both engines size
-their search batches adaptively to stay within the per-move time budget no matter
-how expensive their simulations are.
-```
+heavy rollouts. Modern's edge is per-simulation quality, not raw throughput.
+The latest shared-tree smoke matches scored 3–1 with six rollout workers and 4–0
+with twelve at 200 ms/move. These are small stochastic comparisons, not strength
+ratings. Both engines stop dispatching work at the per-move deadline; modern then
+drains at most one outstanding rollout per worker before choosing its move.
+
+On the Ryzen 5 5600X, the shared tree completed about 267, 1,196, and 1,537
+guided rollouts/s with 1, 6, and 12 workers. Twelve independent root trees
+completed about 1,736 rollouts/s, so sharing one coherent tree costs roughly 11%
+of raw throughput. In a fixed-seed 11-game run against the committed AlphaZero
+checkpoint, both `enh` and `enh-unbiased` scored 3–8. A direct 20-game ablation at
+200 ms scored 11–9 for the positional prior. Treat these as regression fixtures,
+not statistically reliable ratings.

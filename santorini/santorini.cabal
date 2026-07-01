@@ -6,7 +6,8 @@ description:        One project for all the Santorini code:
                     .
                     * Santorini.Core / Protocol / Engine.Modern / Search:
                       the modern engine (negamax MCTS + MCTS-Solver + heavy
-                      rollouts), time-bounded and root-parallel, speaking the
+                      rollouts), time-bounded with WU-UCT-style parallel
+                      rollouts over one persistent tree, speaking the
                       course line-delimited JSON protocol.
                     * Santorini.Legacy.Game / MCTS: the repaired original
                       course submission (a distinct game model + zipper MCTS),

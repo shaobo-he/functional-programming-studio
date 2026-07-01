@@ -22,6 +22,7 @@ module Santorini.Protocol
     -- * Running a protocol-speaking player
   , runPlayer
   , runPlayerIO
+  , runPlayerStateIO
   ) where
 
 import Data.Aeson (Value, decode, encode, object, withObject, (.:), (.=))
@@ -139,11 +140,19 @@ runPlayer chooser = runPlayerIO (\s -> pure (fst (runSt (chooser s) (mkGen 1))))
 -- | Like 'runPlayer' but the board-move decision runs in 'IO' (so it can do a
 -- wall-clock-bounded, multi-threaded search). Placement stays pure.
 runPlayerIO :: (GameState -> IO GameState) -> IO ()
-runPlayerIO choose = do
+runPlayerIO choose =
+  runPlayerStateIO () $ \() state -> do
+    next <- choose state
+    pure (next, ())
+
+-- | Like 'runPlayerIO', but retain search state between board messages. The
+-- placement handshake does not modify that state.
+runPlayerStateIO :: search -> (search -> GameState -> IO (GameState, search)) -> IO ()
+runPlayerStateIO initialSearch choose = do
   initStdio
-  go (mkGen 20240601)
+  go (mkGen 20240601) initialSearch
   where
-    go g = do
+    go g search = do
       eof <- isEOF
       if eof
         then pure ()
@@ -155,11 +164,11 @@ runPlayerIO choose = do
               let (resp, g') = runSt (handlePlacement players) g
               BLC.putStrLn resp
               hFlush stdout
-              go g'
+              go g' search
             Nothing -> case decodeBoard bs of
               Just s -> do
-                s' <- choose s
+                (s', search') <- choose search s
                 BLC.putStrLn (encodeBoard s')
                 hFlush stdout
-                go g
-              Nothing -> go g   -- unparseable line: skip without crashing
+                go g search'
+              Nothing -> go g search   -- unparseable line: skip without crashing
