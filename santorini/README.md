@@ -21,7 +21,7 @@ src/Santorini/
   Core.hs            modern game model: rules, IntMap board, self-contained RNG, sampler + rollout
   Protocol.hs        line-delimited JSON <-> GameState, placement handshake, the player I/O loop
   Engine/Modern.hs   negamax MCTS + MCTS-Solver + heavy rollouts
-  Search.hs          time-bounded shared-tree WU-UCT-style rollout driver
+  Search.hs          time-bounded WU-UCT rollout driver (shared tree + root-parallel coordinators)
   Referee.hs         spawns two players, validates moves, enforces a time limit, logs every step
   Legacy/
     Game.hs          repaired original engine: game model + negamax rollout (own HashMap model)
@@ -42,7 +42,7 @@ alphazero/
 cabal build          # one project, four executables
 ```
 
-Everything ships with GHC (`base`, `containers`, `aeson`, `bytestring`,
+Everything ships with GHC (`base`, `containers`, `array`, `aeson`, `bytestring`,
 `process`, `filepath`, `time`, `unix`, `mtl`, `random`, `unordered-containers`),
 so it builds offline.
 
@@ -140,10 +140,14 @@ A player program takes **no command-line arguments**. Each move is budgeted by
 *time*, not step count: the per-move think budget (milliseconds) is read from the
 `SANTORINI_TIME_MS` environment variable (default 1000). Both players run an
 anytime search to that deadline across **all cores** (built with `-threaded
--with-rtsopts=-N`). The modern player has one persistent logical tree: a
-coordinator performs selection and backup, and worker threads evaluate rollouts
-in parallel. Set `SANTORINI_WORKERS=6` to control only modern rollout workers or
-`GHCRTS=-N6` to cap all Haskell execution.
+-with-rtsopts=-N`). The modern player runs WU-UCT shared trees: a coordinator
+performs selection and backup while worker threads evaluate rollouts in
+parallel. It uses one coordinator per ~6 workers — a single shared tree up to 11
+workers, then additional coordinators (root parallelism) whose roots are merged
+— to use cores that one serial coordinator cannot feed. Set `SANTORINI_WORKERS`
+for the rollout-worker count, `SANTORINI_COORDINATORS` for the coordinator count
+(default `floor(workers/6)`, min 1; `1` = a single shared tree), or `GHCRTS=-N6`
+to cap all Haskell execution.
 
 ## Run a match
 
@@ -193,19 +197,24 @@ Game 1  (first move: side A)
 
 ## Engines
 
-- **modern** (`Santorini.Engine.Modern`): recursive negamax UCT (one negation
-  per ply), an exact MCTS-Solver (proves forced wins/losses and short-circuits),
-  positional rule-guided rollouts. Its WU-UCT-style shared-tree driver counts
-  outstanding rollouts during selection, but updates values only when those
-  rollouts complete. One coordinator owns the immutable tree while pure rollout
-  workers run in parallel, so there is no shared mutation. The selected subtree
-  is retained across protocol turns. A decaying positional prior orders early
-  expansion, while completed rollout values dominate as visits accumulate. Root
-  choice preserves exact proofs and rejects moves that allow an immediate
-  winning reply when a safe move exists. Variants: `base` (plain negamax UCT),
-  `enh` (solver + heavy + prior, the default player), `enh-unbiased` (shared-tree
-  ablation without the prior), `heavy`, `solver`. Set `SANTORINI_ENGINE` to a
-  variant name.
+- **modern** (`Santorini.Engine.Modern`): negamax MCTS (one negation per ply)
+  with an exact MCTS-Solver (proves forced wins/losses and short-circuits) and
+  heavy rule-guided rollouts. The default selection is prior-directed **PUCT**
+  with first-play urgency — `Q + c·P(child)·√(parent N+O) / (1 + child N+O)`,
+  where `P` is a softmax over a positional prior and `Q` is the negamax win-rate
+  — so search concentrates on promising moves instead of first visiting every
+  child. Its **WU-UCT** driver counts outstanding (reserved-but-unfinished)
+  rollouts as `N+O` in the exploration term but keeps exploitation on completed
+  visits only, so concurrent descents diversify without a virtual-loss value
+  penalty. A coordinator owns an immutable tree (children in an array) while pure
+  workers run rollouts, so there is no shared mutation; it uses one coordinator
+  per ~6 workers (a single tree up to 11 workers, then several coordinators whose
+  roots are merged — root parallelism). The selected
+  subtree is retained across protocol turns, and root choice preserves exact
+  proofs and rejects moves that allow an immediate winning reply when a safe move
+  exists. Variants (`SANTORINI_ENGINE`): `enh` (solver + heavy + PUCT, the
+  default player), `enh-ucb` (the previous progressive-bias UCB), `enh-unbiased`
+  (no prior), `heavy`, `solver`, `base` (plain negamax UCT).
 - **oldbot** (`Santorini.Legacy.*`): the original course submission's zipper UCT,
   repaired to be adversarial (negamax backup, `1 - reward/visits` exploitation,
   terminal-root guard). It keeps its own game model, so it shares no engine code
@@ -225,15 +234,24 @@ parallel combiner retains those proofs across all worker roots.
 The trade-off: `oldbot` is the *faster* searcher — its uniform rollouts are cheap,
 so it runs many more simulations per move, while `modern` pays for the solver and
 heavy rollouts. Modern's edge is per-simulation quality, not raw throughput.
-The latest shared-tree smoke matches scored 3–1 with six rollout workers and 4–0
-with twelve at 200 ms/move. These are small stochastic comparisons, not strength
-ratings. Both engines stop dispatching work at the per-move deadline; modern then
-drains at most one outstanding rollout per worker before choosing its move.
+Both engines stop dispatching work at the per-move deadline; modern then drains
+its outstanding rollouts before choosing.
 
-On the Ryzen 5 5600X, the shared tree completed about 267, 1,196, and 1,537
-guided rollouts/s with 1, 6, and 12 workers. Twelve independent root trees
-completed about 1,736 rollouts/s, so sharing one coherent tree costs roughly 11%
-of raw throughput. In a fixed-seed 11-game run against the committed AlphaZero
-checkpoint, both `enh` and `enh-unbiased` scored 3–8. A direct 20-game ablation at
-200 ms scored 11–9 for the positional prior. Treat these as regression fixtures,
-not statistically reliable ratings.
+Recent one-off measurements on a 12-core / RTX 3060 Ti box at 1 s/move — small
+stochastic comparisons, not strength ratings, and not reproducible from the repo
+(no benchmark harness is checked in):
+
+- The array-backed shared tree plus root parallelism lifted the modern player
+  from ~4.7 to ~7.0 of 12 cores in use — one serial coordinator saturates ~6
+  workers, so it runs `floor(workers/6)` coordinators (a second one starts at
+  12 workers).
+- Prior-directed **PUCT** (the new default `enh`) beat the previous
+  progressive-bias UCB (`enh-ucb`) 10–0 over 10 colour-balanced games: at a few
+  thousand rollouts against ~50–100 branching, forcing one visit of every child
+  before deepening wastes the budget, whereas PUCT goes deep on high-prior moves.
+- Root parallelism (2 coordinators) beat a single shared tree 4–1 at equal
+  workers — the extra rollouts outweigh its slightly lower per-simulation
+  quality.
+
+The referee is turn-based, so each player has the whole machine and the same
+wall-clock budget on its own move; these comparisons are apples-to-apples.

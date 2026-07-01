@@ -17,19 +17,21 @@ the [Utah CS6963 line-delimited JSON protocol](https://users.cs.utah.edu/~mflatt
 plus a **referee** that pits two protocol-speaking player programs against each
 other and logs every move.
 
-- **modern-player** — negamax MCTS with an exact MCTS-Solver and heavy rollouts.
+- **modern-player** — negamax MCTS with an exact MCTS-Solver, heavy rollouts, and
+  prior-directed PUCT selection over a WU-UCT parallel search.
 - **legacy-player** — the repaired original course submission: a zipper MCTS
   (plain UCT, uniform rollouts) on its own game model, made negamax-correct.
 - **referee** — validates every move, enforces a per-move time limit, detects
   win/stalemate, and writes a full transcript.
 
 Both players are **time-bounded** (a per-move budget, not a fixed step count)
-and **multi-core** — each runs a root-parallel ensemble of one search tree per
-CPU core. `legacy` is the *faster* searcher: its uniform rollouts are cheap, so
-it runs more simulations per move. `modern`'s simulations are pricier (the
-MCTS-Solver + heavy rollouts) but smarter, and it wins the head-to-head at every
-budget tested (e.g. 6–0 at 100 ms/move, 10–0 at 1 s/move) — the edge is search
-quality per simulation, not speed or parallelism, which both share.
+and **multi-core**. `legacy` runs a root-parallel ensemble of one search tree
+per core; `modern` runs a WU-UCT shared tree per coordinator and adds
+coordinators (root parallelism) as cores allow. `legacy` is the *faster*
+searcher — its uniform rollouts are cheap, so it runs more simulations per move
+— but `modern`'s simulations are smarter (MCTS-Solver + heavy rollouts +
+prior-directed PUCT), trading throughput for per-simulation quality. The edge is
+search quality per simulation, not speed.
 
 One Cabal project, three executables:
 
