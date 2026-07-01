@@ -64,6 +64,12 @@ def parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.getenv("SANTORINI_TIME_MS", "1000")),
     )
+    result.add_argument(
+        "--inference-batch-size",
+        type=int,
+        default=int(os.getenv("SANTORINI_AZ_BATCH", "128")),
+        help="number of leaves reserved per GPU evaluation",
+    )
     result.add_argument("--seed", type=int)
     return result
 
@@ -80,23 +86,30 @@ def main() -> None:
         TorchEvaluator(model, device),
         SearchConfig(
             simulations=args.simulations or 1_000_000,
+            inference_batch_size=max(1, args.inference_batch_size),
             dirichlet_fraction=0.0,
         ),
         rng,
     )
     time_limit = None if args.simulations is not None else max(1, args.time_ms) * 0.95 / 1000
 
+    cached_root = None
     for line in sys.stdin:
         try:
             message = json.loads(line)
             if isinstance(message, list):
+                cached_root = None
                 occupied = message[0] if message else []
                 ours = place_workers(occupied, rng if random_placement else None)
                 response = [ours] if not message else [message[0], ours]
             else:
                 state = State.from_json(message)
-                root = search.search([state], False, time_limit)[0]
-                action = choose_action(root, rng, 0.0)
+                root = search.search(
+                    [state], False, time_limit, reusable_roots=[cached_root]
+                )[0]
+                action = choose_action(root, rng, 0.0, tactical_guard=True)
+                edge = int(np.flatnonzero(root.actions == action)[0])
+                cached_root = root.child(edge)
                 response = apply_action(state, action).to_json()
             print(json.dumps(response, separators=(",", ":")), flush=True)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:

@@ -54,8 +54,9 @@ training, benchmarking, evaluation, and limitation notes.
 The optional Python implementation uses the same no-god-powers rules through a
 tested port of `Santorini.Core`. Its policy has 1,800 fixed action slots (origin
 cell, move direction, build direction/no-build), masked to legal actions. The
-network is a small 5x5 residual policy/value model, and self-play batches one
-leaf from each active game into every neural evaluation.
+network is a small 5x5 residual policy/value model. Self-play batches one leaf
+from each active game; protocol play uses WU-style pending reservations to batch
+many leaves from one root and retains the selected subtree across turns.
 
 Create an isolated environment and install the package:
 
@@ -101,6 +102,11 @@ Measured on this repository's Ryzen 5 5600X and RTX 3060 Ti:
   slower before optimizer work.
 - Training batch 1,024 has better sample throughput than 256; batch 2,048 gives
   no material additional gain.
+- Single-root protocol search reaches about 6,873 simulations/s at batch 128,
+  compared with 582/s at batch 1.
+- With batched single-root search, subtree reuse, and an immediate-tactics root
+  guard, the committed checkpoint scored 9-1 against the current modern player
+  over 10 randomized-placement games at 1,000 ms per turn.
 
 The trained model can speak the existing referee protocol directly:
 

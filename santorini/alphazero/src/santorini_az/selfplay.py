@@ -14,7 +14,7 @@ from .game import (
     transform_sparse_policy,
     transform_state,
 )
-from .mcts import BatchedMCTS, choose_action, visit_policy
+from .mcts import BatchedMCTS, Node, choose_action, visit_policy
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,11 +73,16 @@ class SelfPlayRunner:
         trajectories: list[list[tuple[State, np.ndarray, np.ndarray]]] = [
             [] for _ in range(count)
         ]
+        cached_roots: list[Node | None] = [None] * count
         active = list(range(count))
         completed: list[Example] = []
 
         while active:
-            roots = self.search.search([states[index] for index in active], True)
+            roots = self.search.search(
+                [states[index] for index in active],
+                True,
+                reusable_roots=[cached_roots[index] for index in active],
+            )
             next_active: list[int] = []
             for game_index, root in zip(active, roots, strict=True):
                 state = states[game_index]
@@ -88,6 +93,8 @@ class SelfPlayRunner:
                 )
                 actions, probabilities = visit_policy(root, temperature)
                 action = choose_action(root, self.rng, temperature)
+                edge = int(np.flatnonzero(root.actions == action)[0])
+                cached_roots[game_index] = root.child(edge)
                 trajectories[game_index].append((state, actions, probabilities))
                 next_state = apply_action(state, action, validate=False)
                 states[game_index] = next_state

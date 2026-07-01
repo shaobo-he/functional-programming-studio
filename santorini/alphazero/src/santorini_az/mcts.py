@@ -30,6 +30,7 @@ class Node:
     actions: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int32))
     priors: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
     visits: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int32))
+    pending: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int32))
     value_sums: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.float32))
     children: dict[int, Node] = field(default_factory=dict)
     expanded: bool = False
@@ -51,6 +52,7 @@ class Node:
         priors = np.exp(selected)
         self.priors = (priors / np.sum(priors)).astype(np.float32)
         self.visits = np.zeros(len(self.actions), dtype=np.int32)
+        self.pending = np.zeros(len(self.actions), dtype=np.int32)
         self.value_sums = np.zeros(len(self.actions), dtype=np.float32)
         self.expanded = True
 
@@ -61,11 +63,12 @@ class Node:
             out=np.zeros_like(self.value_sums),
             where=self.visits != 0,
         )
+        total_visits = self.visits + self.pending
         exploration = (
             cpuct
             * self.priors
-            * np.sqrt(float(np.sum(self.visits)) + 1.0)
-            / (1.0 + self.visits)
+            * np.sqrt(float(np.sum(total_visits)) + 1.0)
+            / (1.0 + total_visits)
         )
         return int(np.argmax(q + exploration))
 
@@ -81,13 +84,14 @@ class Node:
 @dataclass(frozen=True, slots=True)
 class SearchConfig:
     simulations: int = 64
+    inference_batch_size: int = 1
     cpuct: float = 1.5
     dirichlet_alpha: float = 0.3
     dirichlet_fraction: float = 0.25
 
 
 class BatchedMCTS:
-    """PUCT search that evaluates one leaf from every active root per batch."""
+    """PUCT search with batched leaf evaluation and reusable roots."""
 
     def __init__(
         self,
@@ -104,13 +108,20 @@ class BatchedMCTS:
         states: Sequence[State],
         add_root_noise: bool,
         time_limit_seconds: float | None = None,
+        reusable_roots: Sequence[Node | None] | None = None,
     ) -> list[Node]:
         deadline = (
             None if time_limit_seconds is None else time.perf_counter() + time_limit_seconds
         )
-        roots = [Node(state) for state in states]
+        if reusable_roots is not None and len(reusable_roots) != len(states):
+            raise ValueError("reusable_roots must match states")
+        candidates = reusable_roots or [None] * len(states)
+        roots = [
+            self._reuse_root(state, candidate)
+            for state, candidate in zip(states, candidates, strict=True)
+        ]
         expandable = [root for root in roots if root.terminal is None]
-        self._evaluate_and_expand(expandable)
+        self._evaluate_and_expand([root for root in expandable if not root.expanded])
         if add_root_noise:
             for root in expandable:
                 noise = self.rng.dirichlet(
@@ -121,21 +132,20 @@ class BatchedMCTS:
                     np.float32
                 )
 
-        for _ in range(self.config.simulations):
+        completed = 0
+        batch_size = max(1, self.config.inference_batch_size)
+        while completed < self.config.simulations:
             if deadline is not None and time.perf_counter() >= deadline:
                 break
             pending: list[Node] = []
             records: list[tuple[list[tuple[Node, int]], Node]] = []
+            reservations = min(batch_size, self.config.simulations - completed)
             for root in expandable:
-                node = root
-                trace: list[tuple[Node, int]] = []
-                while node.expanded and node.terminal is None:
-                    edge = node.select(self.config.cpuct)
-                    trace.append((node, edge))
-                    node = node.child(edge)
-                records.append((trace, node))
-                if node.terminal is None and not node.expanded:
-                    pending.append(node)
+                for _ in range(reservations):
+                    trace, leaf = self._reserve(root)
+                    records.append((trace, leaf))
+                    if leaf.terminal is None and not leaf.expanded:
+                        pending.append(leaf)
 
             values_by_id = self._evaluate_and_expand(pending)
             for trace, leaf in records:
@@ -143,10 +153,33 @@ class BatchedMCTS:
                 if value is None:
                     value = values_by_id[id(leaf)]
                 for parent, edge in reversed(trace):
+                    parent.pending[edge] -= 1
                     value = -value
                     parent.visits[edge] += 1
                     parent.value_sums[edge] += value
+            completed += reservations
         return roots
+
+    def _reserve(self, root: Node) -> tuple[list[tuple[Node, int]], Node]:
+        node = root
+        trace: list[tuple[Node, int]] = []
+        while node.expanded and node.terminal is None:
+            edge = node.select(self.config.cpuct)
+            node.pending[edge] += 1
+            trace.append((node, edge))
+            node = node.child(edge)
+        return trace, node
+
+    @staticmethod
+    def _reuse_root(state: State, candidate: Node | None) -> Node:
+        if candidate is None:
+            return Node(state)
+        if candidate.state == state:
+            return candidate
+        for child in candidate.children.values():
+            if child.state == state:
+                return child
+        return Node(state)
 
     def _evaluate_and_expand(self, nodes: Sequence[Node]) -> dict[int, float]:
         unique: dict[State, Node] = {node.state: node for node in nodes}
@@ -170,6 +203,7 @@ class BatchedMCTS:
                 node.actions = source.actions.copy()
                 node.priors = source.priors.copy()
                 node.visits = source.visits.copy()
+                node.pending = source.pending.copy()
                 node.value_sums = source.value_sums.copy()
                 node.expanded = True
         return result
@@ -191,12 +225,40 @@ def visit_policy(root: Node, temperature: float = 1.0) -> tuple[np.ndarray, np.n
 
 
 def choose_action(
-    root: Node, rng: np.random.Generator, temperature: float = 0.0
+    root: Node,
+    rng: np.random.Generator,
+    temperature: float = 0.0,
+    tactical_guard: bool = False,
 ) -> int:
     actions, probabilities = visit_policy(root, temperature)
     if len(actions) == 0:
         raise ValueError("cannot choose an action from a terminal root")
+    if tactical_guard:
+        candidates = _tactical_candidates(root.state, actions)
+        actions = actions[candidates]
+        probabilities = probabilities[candidates]
+        total = float(np.sum(probabilities))
+        if total == 0.0:
+            probabilities = root.priors[candidates].copy()
+            total = float(np.sum(probabilities))
+        probabilities /= total
     return int(rng.choice(actions, p=probabilities))
+
+
+def _tactical_candidates(state: State, actions: np.ndarray) -> np.ndarray:
+    successors = [apply_action(state, int(action), validate=False) for action in actions]
+    wins = np.asarray([mover_won(successor) for successor in successors])
+    if np.any(wins):
+        return np.flatnonzero(wins)
+    safe = np.asarray([not _has_immediate_win(successor) for successor in successors])
+    return np.flatnonzero(safe) if np.any(safe) else np.arange(len(actions))
+
+
+def _has_immediate_win(state: State) -> bool:
+    return any(
+        mover_won(apply_action(state, action, validate=False))
+        for action in legal_actions(state)
+    )
 
 
 def encoded_batch(states: Sequence[State]) -> np.ndarray:

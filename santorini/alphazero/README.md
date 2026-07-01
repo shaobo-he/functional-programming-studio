@@ -9,7 +9,7 @@ The implementation is deliberately small enough for one workstation:
 
 - Python and PyTorch for training and inference.
 - A 466,201-parameter residual policy/value network.
-- Batched PUCT search across concurrent self-play games.
+- Batched PUCT search across concurrent self-play games and within one live game.
 - Sparse replay targets and all eight square-board symmetries.
 - A line-oriented player compatible with the existing Haskell referee.
 - Differential tests against `Santorini.Core`.
@@ -49,8 +49,15 @@ player's perspective and lies in `[-1, 1]`.
 ### Search and self-play
 
 `BatchedMCTS` runs PUCT. During self-play, each search round selects one leaf
-from every active game and evaluates those leaves as one neural batch. Root
+from every active game and evaluates those leaves as one neural batch. During
+protocol play, it reserves many paths from the single root using WU-style
+pending counts, then evaluates all reserved leaves together. Completed visits
+alone determine Q; completed plus pending visits determine exploration. Root
 Dirichlet noise and move sampling are enabled during early self-play moves.
+
+Protocol play and self-play retain the selected subtree across turns. Protocol
+root choice takes an immediate win when available and rejects moves that allow
+an immediate reply win whenever a safe move exists.
 
 Games start from uniformly randomized legal worker placements. Training
 examples store only legal action indices and normalized visit probabilities;
@@ -129,6 +136,11 @@ Complete self-play with 512 concurrent games produced about 61,000 games/hour
 at 16 MCTS simulations. Training batch 1,024 gave the best useful throughput;
 batch 2,048 did not improve it materially.
 
+Single-root search with the committed checkpoint improved from 582 simulations/s
+at inference batch 1 to 6,873 simulations/s at batch 128. Batch 256 reached
+7,038 simulations/s but added latency for only 2.4% more throughput, so protocol
+play defaults to 128.
+
 ## Training
 
 A minimal smoke run is:
@@ -170,7 +182,8 @@ SANTORINI_TIME_MS=1000 \
 
 The protocol player searches for 95% of `SANTORINI_TIME_MS`, preserving a small
 response margin. `SANTORINI_AZ_SIMS=N` or `--simulations N` selects a fixed
-simulation count instead. Placement is randomized by default; set
+simulation count instead. `SANTORINI_AZ_BATCH=N` controls leaves per inference
+batch and defaults to 128. Placement is randomized by default; set
 `SANTORINI_AZ_RANDOM_PLACEMENT=0` for the deterministic Haskell preference.
 
 The Haskell referee requires a no-argument executable. Use the wrapper:
@@ -186,9 +199,9 @@ Set `SANTORINI_AZ_CHECKPOINT` to make the wrapper load a checkpoint other than
 its default. It loads a local `checkpoints/latest.pt` when one exists and falls
 back to the committed `checkpoints/pilot-5iter.pt` on a fresh clone.
 
-## Pilot results
+## Evaluation results
 
-The five-iteration checkpoint was evaluated with randomized legal placements:
+The original five-iteration checkpoint was evaluated with randomized legal placements:
 
 - 16-4 against `modern-player` at 200 ms per turn using 128 simulations.
 - 11-0 against `modern-player` at 1,000 ms per turn using timed search.
@@ -198,12 +211,18 @@ These are small development matches, not a statistically rigorous strength
 claim. They establish that the pipeline learns, produces legal protocol moves,
 honors its time budget, and is competitive with the existing search engine.
 
+After adding single-root leaf batching, tree reuse, and the tactical root guard,
+10 randomized-placement games against the current PUCT modern player scored 9-1
+for AlphaZero at 1,000 ms per turn, exactly reversing the preceding unbatched
+player's 1-9 result. A fixed-seed regression scored 10-0. These are development
+fixtures, not general strength ratings.
+
 ## Current limitations
 
 - Replay data is kept in memory and is not restored from a checkpoint. Restarting
   training restores model and optimizer state but begins a fresh replay buffer.
-- MCTS tree traversal is single-threaded Python. Parallelism comes from batching
-  many self-play games into GPU inference.
+- MCTS tree traversal is single-threaded Python. GPU parallelism comes from
+  batching many self-play games or many pending leaves from one live root.
 - The implementation uses conventional PUCT, not Gumbel AlphaZero.
 - Worker placement is randomized rather than learned by the policy network.
 - Mutable checkpoints include optimizer state and remain local. The committed
