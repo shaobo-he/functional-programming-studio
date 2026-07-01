@@ -1,7 +1,13 @@
 *.hi
 *.o
 *.rkt~
+__pycache__/
+*.py[cod]
 .lake/
 dist-newstyle/
 compiled/
+.venv/
+*.egg-info/
+santorini/alphazero/checkpoints/*
+!santorini/alphazero/checkpoints/pilot-5iter.pt
 referee-log.txt

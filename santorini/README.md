@@ -30,17 +30,96 @@ app/
   ModernPlayer.hs    -> modern-player   executable
   LegacyPlayer.hs    -> legacy-player   executable (the repaired original bot)
   Referee.hs         -> referee         executable
+  Oracle.hs          -> santorini-oracle development rules oracle
+alphazero/
+  src/santorini_az/  Python rules, network, batched PUCT, self-play, trainer
+  tests/             Python tests, including Haskell/Python differential tests
 ```
 
 ## Build
 
 ```
-cabal build          # one project, three executables
+cabal build          # one project, four executables
 ```
 
 Everything ships with GHC (`base`, `containers`, `aeson`, `bytestring`,
 `process`, `filepath`, `time`, `unix`, `mtl`, `random`, `unordered-containers`),
 so it builds offline.
+
+## AlphaZero trainer
+
+See [`alphazero/README.md`](alphazero/README.md) for the full architecture,
+training, benchmarking, evaluation, and limitation notes.
+
+The optional Python implementation uses the same no-god-powers rules through a
+tested port of `Santorini.Core`. Its policy has 1,800 fixed action slots (origin
+cell, move direction, build direction/no-build), masked to legal actions. The
+network is a small 5x5 residual policy/value model, and self-play batches one
+leaf from each active game into every neural evaluation.
+
+Create an isolated environment and install the package:
+
+```
+cd alphazero
+python3 -m venv .venv
+python3 -m pip --python .venv/bin/python install -e .
+```
+
+Run all Python tests, including the differential test against the Haskell legal
+successor oracle:
+
+```
+cabal build santorini-oracle          # from santorini/
+cd alphazero
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+Run a small end-to-end training smoke test:
+
+```
+.venv/bin/santorini-az-train \
+  --iterations 1 --games 8 --parallel-games 8 \
+  --simulations 16 --train-steps 4 --batch-size 32
+```
+
+Measure actual neural leaf throughput before choosing self-play concurrency:
+
+```
+.venv/bin/santorini-az-benchmark
+```
+
+The machine-tuned defaults use 64 simulations, 512 concurrent games, a training
+batch of 1,024, and a replay capacity of 500,000 positions. The default
+checkpoint is `checkpoints/latest.pt`.
+
+Measured on this repository's Ryzen 5 5600X and RTX 3060 Ti:
+
+- The 466,201-parameter default network evaluates about 124,000 positions/s at
+  batch 512 and saturates near 127,000 positions/s at batch 1,024.
+- Complete self-play at batch 512 produces about 61,000 games/hour with 16 MCTS
+  simulations. A 64-simulation run should be expected to be roughly four times
+  slower before optimizer work.
+- Training batch 1,024 has better sample throughput than 256; batch 2,048 gives
+  no material additional gain.
+
+The trained model can speak the existing referee protocol directly:
+
+```
+SANTORINI_TIME_MS=1000 alphazero/.venv/bin/santorini-az-player \
+  alphazero/checkpoints/latest.pt
+```
+
+The protocol player searches to 95% of `SANTORINI_TIME_MS`, leaving time to
+encode and flush its response. Set `SANTORINI_AZ_SIMS` or pass `--simulations`
+to use a fixed simulation count instead.
+
+For the referee, which expects a no-argument executable, use
+`alphazero/play-checkpoint.sh`. Override its model with
+`SANTORINI_AZ_CHECKPOINT=/path/to/model.pt`.
+
+Self-play and the protocol player randomize legal worker placements by default.
+Set `SANTORINI_AZ_RANDOM_PLACEMENT=0` to recover the deterministic Haskell
+placement preference, and pass `--seed N` to reproduce protocol-player choices.
 
 ## The protocol
 

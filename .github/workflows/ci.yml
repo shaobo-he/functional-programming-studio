@@ -53,6 +53,15 @@ jobs:
       - name: Run tests
         run: cabal test all --test-show-details=direct
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: AlphaZero rules and search tests
+        run: |
+          python -m pip install numpy
+          PYTHONPATH=alphazero/src python -m unittest discover -s alphazero/tests -v
+
       - name: Referee smoke (modern vs legacy, 1 game)
         run: |
           REF=$(cabal list-bin referee)
