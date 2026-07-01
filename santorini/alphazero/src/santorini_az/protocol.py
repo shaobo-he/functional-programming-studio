@@ -11,7 +11,10 @@ import numpy as np
 
 from .game import State, apply_action
 from .mcts import BatchedMCTS, SearchConfig, choose_action
-from .network import TorchEvaluator, default_device, load_checkpoint
+
+# NOTE: `.network` (and therefore PyTorch) is imported lazily inside main(), so
+# this module — and place_workers, which the tests exercise — can be imported
+# without PyTorch installed. CI runs the torch-free tests only.
 
 PLACEMENT_PREFERENCE = (
     (2, 2),
@@ -66,6 +69,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from .network import TorchEvaluator, default_device, load_checkpoint
+
     args = parser().parse_args()
     device = default_device(args.device)
     model, _ = load_checkpoint(args.checkpoint, device)
