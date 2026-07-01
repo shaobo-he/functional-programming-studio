@@ -6,6 +6,7 @@
 module Santorini.Search
   ( timedParallel
   , timedShared
+  , timedSharedWith
   , workerCount
   ) where
 
@@ -14,7 +15,8 @@ import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (SomeException, evaluate, finally, try)
 import Control.Monad (forM, replicateM_)
-import Data.List (foldl')
+import Data.Function (on)
+import Data.List (foldl', maximumBy)
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 
 import Santorini.Core
@@ -23,10 +25,14 @@ import Santorini.Engine.Modern
   , MNode
   , RolloutJob
   , cancelRollout
+  , childrenOf
   , chooseRootChild
   , finishRollout
   , forceTreeStats
+  , mergeRoots
+  , mkRoot
   , nodeState
+  , nodeVisits
   , reserveRollout
   , reuseRoot
   , rootSettled
@@ -47,8 +53,11 @@ timedParallel :: Engine -> Int -> Int -> GameState -> IO GameState
 timedParallel eng thinkMs workers state =
   fst <$> timedShared eng thinkMs workers Nothing state
 
--- | Search one position using a shared logical tree. A cached root is reused
--- when it matches the position or contains the opponent's reply as a child.
+-- | Search one position. Below the single-coordinator saturation point the
+-- search is one shared logical tree (a cached root is reused when it matches the
+-- position or holds the opponent's reply). Above it we run several independent
+-- coordinators and merge their roots (root parallelism), which keeps more cores
+-- busy than one serial coordinator can feed.
 timedShared
   :: Engine
   -> Int
@@ -56,14 +65,77 @@ timedShared
   -> Maybe MNode
   -> GameState
   -> IO (GameState, Maybe MNode)
-timedShared eng thinkMs workers cached state = do
+timedShared eng thinkMs workers =
+  timedSharedWith eng thinkMs workers (max 1 (workers `div` workersPerCoordinator))
+
+-- | Like 'timedShared' but with an explicit root-parallel degree (coordinator
+-- count, e.g. from SANTORINI_COORDINATORS). @coords <= 1@ is the single shared
+-- tree; higher values run that many independent coordinators over
+-- @workers `div` coords@ rollout workers each.
+timedSharedWith
+  :: Engine -> Int -> Int -> Int -> Maybe MNode -> GameState -> IO (GameState, Maybe MNode)
+timedSharedWith eng thinkMs workers coords cached state
+  | coords <= 1 = singleShared eng thinkMs workers cached state
+  | otherwise   = rootParallel eng thinkMs coords perCoord cached state
+  where
+    perCoord = max 1 (workers `div` coords)
+
+-- | One coordinator saturates roughly this many rollout workers before its
+-- serial selection/backup caps throughput (measured ~6 on a 12-core box).
+workersPerCoordinator :: Int
+workersPerCoordinator = 6
+
+-- | The original single-shared-tree driver.
+singleShared
+  :: Engine -> Int -> Int -> Maybe MNode -> GameState -> IO (GameState, Maybe MNode)
+singleShared eng thinkMs workers cached state = do
   let root = reuseRoot eng state cached
   searched <- growShared eng thinkMs workers (stateSeed state) root
   case chooseRootChild eng searched of
     Just child -> pure (nodeState child, Just child)
-    Nothing -> case getValidNextStates state of
-      next : _ -> pure (next, Nothing)
-      [] -> pure (state, Nothing)
+    Nothing    -> firstMove state
+
+-- | Root parallelism: @coords@ independent coordinators, each with its own tree
+-- and @perCoord@ rollout workers, run concurrently to the deadline; then root
+-- statistics are summed and exact proofs OR-combined to choose the move. The
+-- deepest matching subtree is retained for next-turn reuse.
+rootParallel
+  :: Engine -> Int -> Int -> Int -> Maybe MNode -> GameState -> IO (GameState, Maybe MNode)
+rootParallel eng thinkMs coords perCoord cached state = do
+  let seed0 = stateSeed state
+      roots = [ if i == 0 then reuseRoot eng state cached else mkRoot eng state
+              | i <- [0 .. coords - 1] ]
+      seeds = [ seed0 + i * 2654435761 + 1 | i <- [0 .. coords - 1] ]
+  searched <- runConcurrently
+                [ growShared eng thinkMs perCoord seed root
+                | (seed, root) <- zip seeds roots ]
+  case chooseRootChild eng (mergeRoots searched) of
+    Just child ->
+      let moveState = nodeState child
+      in pure (moveState, bestSubtreeFor moveState searched)
+    Nothing -> firstMove state
+
+firstMove :: GameState -> IO (GameState, Maybe MNode)
+firstMove state = case getValidNextStates state of
+  next : _ -> pure (next, Nothing)
+  []       -> pure (state, Nothing)
+
+-- | The deepest real subtree for @moveState@ across the searched trees, kept so
+-- the next protocol turn can reuse accumulated search under the chosen move.
+bestSubtreeFor :: GameState -> [MNode] -> Maybe MNode
+bestSubtreeFor moveState roots =
+  case [ c | r <- roots, c <- childrenOf r, nodeState c == moveState ] of
+    [] -> Nothing
+    cs -> Just (maximumBy (compare `on` nodeVisits) cs)
+
+-- | Run IO actions concurrently (one thread each) and collect their results.
+runConcurrently :: [IO a] -> IO [a]
+runConcurrently acts = do
+  slots <- forM acts $ \act -> do
+    slot <- newEmptyMVar
+    _ <- forkIO (act >>= putMVar slot)
+    pure slot
+  mapM takeMVar slots
 
 growShared :: Engine -> Int -> Int -> Int -> MNode -> IO MNode
 growShared eng thinkMs requestedWorkers seed root = do

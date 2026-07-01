@@ -32,6 +32,8 @@ module Santorini.Engine.Modern
   , cancelRollout
   , chooseRootChild
   , reuseRoot
+  , childrenOf
+  , mergeRoots
   ) where
 
 import Data.Array (Array, listArray, elems, bounds, (!), (//))
@@ -394,6 +396,49 @@ chooseRootChild eng root =
             | not (null safe) = safe
             | otherwise = candidates
       in Just (maximumBy (compare `on` mVisits) pool)
+
+-- | Merge several independently-searched roots of the SAME position into one
+-- root for final move choice (root parallelization). Every tree expands the
+-- root's children from getValidNextStates in the same order, so child index j
+-- names the same move in every tree; visits and rewards are summed and exact
+-- solver proofs are OR-combined. Merged children carry no subtrees, since root
+-- choice reads only their visits/proofs/state.
+mergeRoots :: [MNode] -> MNode
+mergeRoots []             = error "mergeRoots: no roots"
+mergeRoots [r]            = r
+mergeRoots roots@(r0 : _) =
+  let columns = map childrenOf roots
+      width = maximum (0 : map length columns)
+  in if width == 0
+       then r0
+       else r0
+         { mVisits  = sum (map mVisits roots)
+         , mReward  = sum (map mReward roots)
+         , mPending = 0
+         , mProven  = foldr combineProof PU (map mProven roots)
+         , mKids    = Just (mkKids [ mergeColumn j columns | j <- [0 .. width - 1] ])
+         }
+  where
+    mergeColumn j cols =
+      case [ ks !! j | ks <- cols, length ks > j ] of
+        []          -> error "mergeRoots: empty child column"
+        cs@(c0 : _) -> c0
+          { mVisits  = sum (map mVisits cs)
+          , mReward  = sum (map mReward cs)
+          , mPending = 0
+          , mProven  = foldr combineProof PU (map mProven cs)
+          , mKids    = Nothing
+          }
+
+-- Combine two EXACT proofs of the same position from different trees. Proofs
+-- are consistent (a position cannot be both a proven win and a proven loss), so
+-- any non-PU proof dominates.
+combineProof :: Proven -> Proven -> Proven
+combineProof PWin  _     = PWin
+combineProof _     PWin  = PWin
+combineProof PLoss _     = PLoss
+combineProof _     PLoss = PLoss
+combineProof PU    PU    = PU
 
 -- | Reuse an exact cached root, or its child after the opponent's reply.
 reuseRoot :: Engine -> GameState -> Maybe MNode -> MNode
